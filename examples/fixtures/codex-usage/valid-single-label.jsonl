@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"thread-fixture-valid-001"}
+{"type":"turn.started","turn_id":"turn-1"}
+{"type":"turn.completed","turn_id":"turn-1","usage":{"input_tokens":100,"cache_read_input_tokens":40,"output_tokens":50,"reasoning_output_tokens":10}}
+{"type":"turn.started","turn_id":"turn-2"}
+{"type":"turn.completed","turn_id":"turn-2","usage":{"input_tokens":200,"cache_read_input_tokens":60,"output_tokens":80,"reasoning_output_tokens":15}}

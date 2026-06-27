@@ -1,0 +1,1 @@
+{schema: agent-file-coordination/event, schema_version: 0.1.0, event_id: evt-bad-json-001, event_type: TASK_ASSIGNED}

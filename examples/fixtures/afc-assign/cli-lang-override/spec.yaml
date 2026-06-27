@@ -1,0 +1,16 @@
+task_id: cli-lang-override-test
+agent_name: DocsWorker
+role: implementer
+protocol_mode: task-only
+coordinator_authority: no
+workspace.mode: existing_edit_worktree
+workspace.path: /projects/my-app
+workspace.may_create_worktree: no
+permission_scope.modify_source: yes
+permission_scope.run_commands: tests_only
+validation_tier: targeted-test
+report_path: report-DocsWorker-cli-lang-override-test.md
+created_at: 2026-06-08
+purpose: Test CLI --handoff-language overrides spec handoff.language.
+acceptance_criteria: CLI language flag overrides the spec language.
+handoff.language: en

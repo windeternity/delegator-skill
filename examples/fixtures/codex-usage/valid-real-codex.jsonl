@@ -1,0 +1,3 @@
+{"type":"thread.started","thread_id":"thread-real-codex-001"}
+{"type":"turn.completed","turn_id":"turn-1","usage":{"input_tokens":131216,"cached_input_tokens":65920,"output_tokens":1430,"reasoning_output_tokens":158}}
+{"type":"turn.completed","turn_id":"turn-2","usage":{"input_tokens":174640,"cached_input_tokens":93952,"output_tokens":2010,"reasoning_output_tokens":220}}

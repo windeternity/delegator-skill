@@ -1,0 +1,1 @@
+{"schema":"agent-file-coordination/event","schema_version":"0.1.0","event_id":"evt-alpha-assigned","event_type":"TASK_ASSIGNED","task_id":"alpha","agent_name":"Worker","status":"ASSIGNED","created_at":"2026-06-13","summary":"Assigned alpha."}

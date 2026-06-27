@@ -1,0 +1,17 @@
+task_id: supported-ja-template
+agent_name: DocsWorker
+role: implementer
+protocol_mode: task-only
+coordinator_authority: no
+workspace.mode: existing_edit_worktree
+workspace.path: /projects/my-app
+workspace.may_create_worktree: no
+permission_scope.modify_source: yes
+permission_scope.run_commands: tests_only
+validation_tier: targeted-test
+report_path: report-DocsWorker-supported-ja.md
+created_at: 2026-06-08
+purpose: Test unsupported language with custom template.
+acceptance_criteria: Custom handoff template is used for unsupported language.
+handoff.language: ja
+handoff.template: "あなたは {agent_name} です。\nこの既存の worktree をプロジェクトとして開いてください：{ws_path}。\n{inbox_dir} をプロジェクトとして開かないでください。\n新しい worktree を作成しないでください。\n{task_filepath} を読み取り、Permission Scope 内でのみこのタスクを実行し、レポートを指定された Report Path ({report_path}) に書き込んでください。commit/push しないでください。"

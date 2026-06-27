@@ -1,0 +1,31 @@
+---
+schema: agent-file-coordination/task
+schema_version: 0.1.0
+task_id: closed
+agent_name: Worker
+role: implementer
+protocol_mode: task-only
+coordinator_authority: no
+status: CLOSED_GO
+permission_scope:
+  read_files: yes
+  write_task_files: no
+  write_reports: yes
+  modify_source: no
+  run_commands: none
+  network_access: none
+  commit_push: no
+  destructive_actions: no
+workspace:
+  mode: read_only_shared
+  path: <PROJECT_ROOT>
+  may_create_worktree: no
+validation_tier: no-test-needed
+report_path: <PROJECT_ROOT>/.agent-inbox/report-closed.md
+created_at: 2026-06-13
+---
+
+# Closed
+
+## Role Boundary
+You are the assigned worker agent for this task, not the coordinator.

@@ -1,0 +1,12 @@
+{"schema":"agent-file-coordination/event","schema_version":"0.1.0","event_id":"evt-001","event_type":"TASK_ASSIGNED","task_id":"legacy-task","status":"ASSIGNED","created_at":"2026-04-01","summary":"Legacy assigned event."}
+{"schema":"agent-file-coordination/event","schema_version":"0.1.0","event_id":"evt-002","event_type":"REPORT_RECEIVED","task_id":"legacy-task","created_at":"2026-04-02","summary":"Legacy report received."}
+{"schema":"agent-file-coordination/event","schema_version":"0.1.0","event_id":"evt-003","event_type":"COORDINATOR_VERDICT","task_id":"legacy-task","created_at":"2026-04-03","summary":"Legacy verdict issued."}
+{"schema":"agent-file-coordination/event","schema_version":"0.1.0","event_id":"evt-004","event_type":"TASK_CLOSED","task_id":"legacy-task","status":"CLOSED_GO","created_at":"2026-04-03","summary":"Legacy task closed."}
+{"schema":"agent-file-coordination/event","schema_version":"0.1.0","event_id":"evt-005","event_type":"ROSTER_UPDATED","created_at":"2026-04-05","summary":"Legacy roster update."}
+{"schema":"agent-file-coordination/event","schema_version":"0.1.0","event_id":"evt-006","event_type":"DECISION","task_id":"legacy-task","created_at":"2026-04-06","summary":"Coordinator decision recorded."}
+{"schema":"agent-file-coordination/event","schema_version":"0.1.0","event_id":"evt-007","event_type":"NOTE","task_id":"legacy-task","created_at":"2026-04-07","summary":"Coordinator note added."}
+{"schema":"agent-file-coordination/event","schema_version":"0.1.0","event_id":"evt-008","event_type":"PR_OPENED","task_id":"legacy-task","created_at":"2026-04-08","summary":"PR opened for legacy task."}
+{"schema":"agent-file-coordination/event","schema_version":"0.1.0","event_id":"evt-009","event_type":"SNAPSHOT_BUILT","created_at":"2026-04-09","summary":"Snapshot built."}
+{"schema":"agent-file-coordination/event","schema_version":"0.1.0","event_id":"evt-010","event_type":"SNAPSHOT_READY","created_at":"2026-04-09","summary":"Snapshot ready."}
+{"schema":"agent-file-coordination/event","schema_version":"0.1.0","event_id":"evt-011","event_type":"TASK_NEEDS_FIX","task_id":"legacy-task","status":"NEEDS_FIX","created_at":"2026-04-10","summary":"Task needs fix."}
+{"schema":"agent-file-coordination/event","schema_version":"0.1.0","event_id":"evt-012","event_type":"TASK_BLOCKED","task_id":"legacy-task","status":"HELD","created_at":"2026-04-11","summary":"Task held."}

@@ -1,0 +1,1 @@
+{"schema":"agent-file-coordination/event","schema_version":"0.1.0","event_id":"evt-dispatched-no-task","event_type":"TASK_DISPATCHED","agent_name":"Worker","created_at":"2026-06-12","summary":"Dispatched without task_id."}

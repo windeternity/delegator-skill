@@ -1,0 +1,15 @@
+task_id: confirm-test
+agent_name: TestWorker
+role: implementer
+protocol_mode: task-only
+coordinator_authority: no
+validation_tier: no-test-needed
+report_path: .agent-inbox/report-TestWorker-confirm-test.md
+purpose: Test dispatch confirmation workflow
+workspace.mode: read_only_shared
+workspace.path: <PROJECT_ROOT>
+workspace.may_create_worktree: no
+permission_scope.modify_source: no
+permission_scope.run_commands: none
+created_at: 2026-06-12
+acceptance_criteria: Dispatch confirmation appends one TASK_DISPATCHED event.

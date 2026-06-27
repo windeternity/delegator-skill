@@ -1,0 +1,20 @@
+task_id: release-changelog-update-zh
+agent_name: ReleaseBot
+role: implementer
+protocol_mode: task-only
+coordinator_authority: no
+workspace.mode: existing_edit_worktree
+workspace.path: /projects/my-app
+workspace.may_create_worktree: no
+workspace.branch: codex/release-changelog
+workspace.locked_files_or_areas: CHANGELOG.md, VERSION
+permission_scope.modify_source: yes
+permission_scope.run_commands: tests_only
+permission_scope.network_access: none
+permission_scope.commit_push: approved
+validation_tier: targeted-test
+report_path: report-ReleaseBot-release-changelog-update-zh.md
+created_at: 2026-06-12
+purpose: Update CHANGELOG.md and VERSION for the upcoming release.
+acceptance_criteria: Chinese release handoff is generated.; Release scope remains valid.
+handoff.language: zh

@@ -1,0 +1,21 @@
+task_id: fix-readme-typo
+agent_name: DocsWorker
+role: implementer
+protocol_mode: task-only
+coordinator_authority: no
+workspace.mode: existing_edit_worktree
+workspace.path: /projects/my-app
+workspace.may_create_worktree: no
+permission_scope.modify_source: yes
+permission_scope.run_commands: tests_only
+validation_tier: targeted-test
+report_path: report-DocsWorker-fix-readme-typo.md
+created_at: 2026-06-08
+purpose: Fix a typo in the README badge URL.
+non_goals: Do not rewrite the README.; Do not add new badges.
+acceptance_criteria: Badge URL points to the correct CI pipeline.; README renders correctly.
+evidence_to_report: Diff of the changed line.
+read_first: README.md
+model_hint.preferred: fast-editing model
+model_hint.reason: Simple text replacement
+model_hint.fallback: any available model

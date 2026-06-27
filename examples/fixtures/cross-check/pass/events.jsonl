@@ -1,0 +1,1 @@
+{"schema":"agent-file-coordination/event","schema_version":"0.1.0","event_id":"evt-cross-001","event_type":"TASK_ASSIGNED","task_id":"cross-check-pass-001","agent_name":"Reviewer","status":"ASSIGNED","created_at":"2026-06-08","summary":"Assigned cross-check pass task."}

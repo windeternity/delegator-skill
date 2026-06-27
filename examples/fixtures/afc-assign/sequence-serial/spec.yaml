@@ -1,0 +1,18 @@
+task_id: serial-seq-task
+agent_name: SeqWorker
+role: implementer
+protocol_mode: task-only
+coordinator_authority: no
+workspace.mode: existing_edit_worktree
+workspace.path: /projects/my-app
+workspace.may_create_worktree: no
+permission_scope.modify_source: yes
+permission_scope.run_commands: tests_only
+validation_tier: targeted-test
+report_path: report-SeqWorker-serial-seq-task.md
+created_at: 2026-06-13
+purpose: Test serial sequence marker.
+non_goals: None.
+acceptance_criteria: Serial sequence marker appears in handoff.
+evidence_to_report: Handoff output.
+handoff.sequence: 37

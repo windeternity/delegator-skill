@@ -1,0 +1,11 @@
+task_id: cli-date-test
+agent_name: CliDateWorker
+role: implementer
+protocol_mode: task-only
+coordinator_authority: no
+workspace.mode: existing_edit_worktree
+workspace.path: /projects/bad
+workspace.may_create_worktree: no
+validation_tier: targeted-test
+report_path: report.md
+purpose: This spec omits created_at so the CLI flag is used.

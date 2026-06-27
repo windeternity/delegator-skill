@@ -1,0 +1,22 @@
+task_id: release-changelog-update
+agent_name: ReleaseBot
+role: implementer
+protocol_mode: task-only
+coordinator_authority: no
+workspace.mode: existing_edit_worktree
+workspace.path: /projects/my-app
+workspace.may_create_worktree: no
+workspace.branch: codex/release-changelog
+workspace.locked_files_or_areas: CHANGELOG.md, VERSION
+permission_scope.modify_source: yes
+permission_scope.run_commands: tests_only
+permission_scope.network_access: none
+permission_scope.commit_push: approved
+validation_tier: targeted-test
+report_path: report-ReleaseBot-release-changelog-update.md
+created_at: 2026-06-12
+purpose: Update CHANGELOG.md and VERSION for the upcoming release.
+non_goals: Do not modify source code.; Do not merge PRs.
+acceptance_criteria: CHANGELOG.md reflects the correct version and date.; VERSION file updated.; Staged-file allowlist enforced.
+evidence_to_report: git diff --stat; git diff --name-only; commit message
+read_first: CHANGELOG.md; VERSION; references/delegated-release-operations.md

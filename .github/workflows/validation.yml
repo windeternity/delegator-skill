@@ -1,0 +1,170 @@
+name: Validation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  protocol-validation:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Validate good protocol fixtures
+        run: python -B scripts/validate-agent-inbox.py examples/fixtures/valid
+
+      - name: Validate two-agent demo
+        run: python -B scripts/validate-agent-inbox.py examples/two-agent-demo
+
+      - name: Validate MOA review demo
+        run: python -B scripts/validate-agent-inbox.py examples/moa-review-demo
+
+      - name: Validate MOA synthesis demo
+        run: python -B scripts/validate-agent-inbox.py examples/moa-synthesis-demo
+
+      - name: Confirm invalid fixtures fail
+        run: |
+          if python -B scripts/validate-agent-inbox.py examples/fixtures/invalid; then
+            echo "Invalid fixtures unexpectedly passed"
+            exit 1
+          fi
+
+      - name: Run public safety scan
+        run: python -B scripts/check-public-safety.py .
+
+      - name: Check release evidence gates
+        run: |
+          python - <<'PY'
+          import pathlib, sys
+
+          # Internal-only release-evidence gate: these governance docs ship only
+          # in the private upstream. In the public export they are absent, so the
+          # gate skips gracefully while the public-relevant minimal-permissions
+          # check below still runs.
+          checklist_path = pathlib.Path("PUBLIC_RELEASE_CHECKLIST.md")
+          policy_path = pathlib.Path("docs/PUBLICATION_POLICY.md")
+          if checklist_path.exists() and policy_path.exists():
+              required = {
+                  "secret-scan evidence": "Secret-scan evidence gate",
+                  "action-pinning decision": "Action-pinning decision gate",
+                  "full-history secret scan": "full-history secret scan",
+              }
+              haystack = "\n".join(
+                  [checklist_path.read_text(encoding="utf-8"),
+                   policy_path.read_text(encoding="utf-8")]
+              ).lower()
+              missing = [label for label, needle in required.items() if needle.lower() not in haystack]
+              if missing:
+                  sys.exit("Missing release evidence gates: " + ", ".join(missing))
+          else:
+              print("release evidence gate: skipped (internal-only docs absent)")
+
+          workflow = pathlib.Path(".github/workflows/validation.yml").read_text(encoding="utf-8")
+          before_jobs = workflow.split("\njobs:", 1)[0]
+          if "permissions:" not in before_jobs or "contents: read" not in before_jobs:
+              sys.exit("Missing top-level minimal CI permissions: contents: read")
+          PY
+
+      - name: Run public-safety scanner fixture tests
+        run: python -B examples/fixtures/check-public-safety/run-tests.py
+
+      - name: Run doc audit
+        run: python -B scripts/audit-docs.py .
+
+      - name: Run audit-docs size gate fixture tests
+        run: python -B examples/fixtures/audit-docs-size/run-tests.py
+
+      - name: Run audit-docs surface-growth gate fixture tests
+        run: python -B examples/fixtures/audit-docs-growth/run-tests.py
+
+      - name: Run afc-init fixture tests
+        run: python -B examples/fixtures/afc-init/run-tests.py
+
+      - name: Run afc-assign fixture tests
+        run: python -B examples/fixtures/afc-assign/run-tests.py
+
+      - name: Run shared parser and validator fixture tests
+        run: python -B examples/fixtures/afc-shared/run-tests.py
+
+      - name: Run Delegator efficiency regression tests
+        run: python -B examples/fixtures/afc-efficiency/run-tests.py
+
+      - name: Run afc-status fixture tests
+        run: python -B examples/fixtures/afc-status/run-tests.py
+
+      - name: Run afc-poll fixture tests
+        run: python -B examples/fixtures/afc-poll/run-tests.py
+
+      - name: Run afc-next fixture tests
+        run: python -B examples/fixtures/afc-next/run-tests.py
+
+      - name: Run afc-handoff fixture tests
+        run: python -B examples/fixtures/afc-handoff/run-tests.py
+
+      - name: Run afc-close fixture tests
+        run: python -B examples/fixtures/afc-close/run-tests.py
+
+      - name: Run afc-snapshot fixture tests
+        run: python -B examples/fixtures/afc-snapshot/run-tests.py
+
+      - name: Run afc-watch fixture tests
+        run: python -B examples/fixtures/afc-watch/run-tests.py
+
+      - name: Run afc-repair-report fixture tests
+        run: python -B examples/fixtures/afc-repair-report/run-tests.py
+
+      - name: Run afc-intake fixture tests
+        run: python -B examples/fixtures/afc-intake/run-tests.py
+
+      - name: Run CAL-3 dispatcher fixture tests
+        run: python -B examples/fixtures/afc-cal3/run-tests.py
+
+      - name: Run inbox lifecycle fixture tests
+        run: python -B examples/fixtures/inbox-lifecycle/run-tests.py
+
+      - name: Run summarize-codex-usage fixture tests
+        run: python -B examples/fixtures/codex-usage/run-tests.py
+
+      - name: Run e2e dogfood fixture tests
+        run: python -B examples/fixtures/e2e-dogfood/run-tests.py
+
+      - name: Run afc-blast-radius fixture tests
+        run: python -B examples/fixtures/afc-blast-radius/run-tests.py
+
+      - name: Run afc-validation-command fixture tests
+        run: python -B examples/fixtures/afc-validation-command/run-tests.py
+
+      - name: Check public-facing Delegator naming
+        run: python -B scripts/check-public-naming.py
+
+      - name: Validate skill metadata
+        run: |
+          test -f SKILL.md
+          test -f agents/openai.yaml
+          python - <<'PY'
+          import pathlib, sys
+          text = pathlib.Path("SKILL.md").read_text(encoding="utf-8")
+          if not text.startswith("---"):
+              sys.exit("SKILL.md missing YAML frontmatter")
+          parts = text.split("---", 2)
+          if len(parts) < 3:
+              sys.exit("SKILL.md frontmatter is not closed")
+          fm = parts[1]
+          if "name: delegator" not in fm:
+              sys.exit("SKILL.md frontmatter must use name: delegator")
+          if "description:" not in fm:
+              sys.exit("SKILL.md frontmatter must include description")
+          PY

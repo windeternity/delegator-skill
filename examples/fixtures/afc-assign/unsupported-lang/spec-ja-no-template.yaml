@@ -1,0 +1,16 @@
+task_id: unsupported-ja-no-template
+agent_name: DocsWorker
+role: implementer
+protocol_mode: task-only
+coordinator_authority: no
+workspace.mode: existing_edit_worktree
+workspace.path: /projects/my-app
+workspace.may_create_worktree: no
+permission_scope.modify_source: yes
+permission_scope.run_commands: tests_only
+validation_tier: targeted-test
+report_path: report-DocsWorker-unsupported-ja.md
+created_at: 2026-06-08
+purpose: Test unsupported language without template.
+acceptance_criteria: Unsupported language without template fails localization.
+handoff.language: ja

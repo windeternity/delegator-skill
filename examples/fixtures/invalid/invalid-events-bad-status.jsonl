@@ -1,0 +1,2 @@
+{"schema":"agent-file-coordination/event","schema_version":"0.1.0","event_id":"evt-invalid-status","event_type":"TASK_ASSIGNED","task_id":"task-invalid-event","agent_name":"Reviewer","status":"DONE","created_at":"2026-06-07","summary":"This should fail because DONE is not a lifecycle status."}
+

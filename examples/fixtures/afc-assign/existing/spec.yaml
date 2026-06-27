@@ -1,0 +1,13 @@
+task_id: already-assigned
+agent_name: ExistingWorker
+role: implementer
+protocol_mode: task-only
+coordinator_authority: no
+workspace.mode: existing_edit_worktree
+workspace.path: /projects/existing
+workspace.may_create_worktree: no
+validation_tier: targeted-test
+report_path: report.md
+created_at: 2026-06-08
+purpose: This task file already exists.
+acceptance_criteria: Existing task collision is detected.

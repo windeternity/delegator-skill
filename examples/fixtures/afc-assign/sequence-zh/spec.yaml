@@ -1,0 +1,19 @@
+task_id: zh-seq-task
+agent_name: SeqWorker
+role: implementer
+protocol_mode: task-only
+coordinator_authority: no
+workspace.mode: existing_edit_worktree
+workspace.path: /projects/my-app
+workspace.may_create_worktree: no
+permission_scope.modify_source: yes
+permission_scope.run_commands: tests_only
+validation_tier: targeted-test
+report_path: report-SeqWorker-zh-seq-task.md
+created_at: 2026-06-13
+purpose: Test Chinese sequence marker.
+non_goals: None.
+acceptance_criteria: Chinese sequence marker appears in handoff.
+evidence_to_report: Handoff output.
+handoff.language: zh
+handoff.sequence: 37

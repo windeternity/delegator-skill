@@ -1,0 +1,12 @@
+task_id: ../../../etc/passwd
+agent_name: EvilWorker
+role: implementer
+protocol_mode: task-only
+coordinator_authority: no
+workspace.mode: existing_edit_worktree
+workspace.path: /projects/bad
+workspace.may_create_worktree: no
+validation_tier: targeted-test
+report_path: report.md
+created_at: 2026-06-08
+purpose: This spec has path separators in task_id.
