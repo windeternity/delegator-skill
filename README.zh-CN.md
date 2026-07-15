@@ -155,6 +155,7 @@ python scripts/check-public-safety.py .                             # 扫描机�
 ## 文档导航
 
 **入门**
+- [最小闭环](docs/MINIMAL_LOOP.md) — **第一次成功闭环先读这里，再看完整快速开始。** 五步、四个文件、无需聊天中转。
 - [首次运行](docs/FIRST_RUN.md) — 从这里开始：首次委派时 Agent 会问你什么，以及不同自动化级别下要求有何不同
 - [快速开始](docs/QUICKSTART.md) — 最小安装和冒烟测试
 - [架构](docs/ARCHITECTURE.md) — 项目结构、文件角色与数据流
