@@ -71,3 +71,7 @@ This page maps how the pieces of Delegator fit together. For step-by-step setup,
 ## Compatibility note
 
 Delegator is the public skill name. The underlying protocol continues to use the `agent-file-coordination/*` schema namespace and `afc-*` script names so existing templates, validators, and early-adopter inboxes remain valid.
+
+## Anti-Weight Principle
+
+Delegator matures by reducing coordinator burden, not expanding it. Every change should either remove coordinator decisions, collapse repeated reads, or move complexity behind an optional helper. The full anti-weight governance rules are documented in `docs/QUALITY_ECONOMICS.md`.

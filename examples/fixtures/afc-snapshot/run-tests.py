@@ -183,6 +183,131 @@ def test_active_size_zero_without_active_working_set():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def test_next_action_text():
+    inbox = os.path.join(PASS_DIR, "basic")
+    ok, stdout, _ = run(["--next-action", inbox], label="next-action-text")
+    if not ok:
+        return False
+    for expected in [
+        "route_required:",
+        "cal_default_recorded:",
+        "active_tasks:",
+        "new_reports:",
+        "recommended_next_action:",
+        "read_next:",
+        "run_next:",
+    ]:
+        if expected not in stdout:
+            print(f"    FAIL: missing {expected!r}")
+            ok = False
+    return ok
+
+
+def test_next_action_json():
+    inbox = os.path.join(PASS_DIR, "basic")
+    ok, stdout, _ = run(["--next-action", "--json", inbox], label="next-action-json")
+    if not ok:
+        return False
+    data = json.loads(stdout)
+    required_keys = [
+        "route_required", "cal_default_recorded", "active_tasks", "new_reports",
+        "rejected_reports", "stale_tasks", "roster_status",
+        "external_worker_routes", "cal3_callable_routes",
+        "roster_blocking_reason", "recommended_next_action", "read_next", "run_next"
+    ]
+    for key in required_keys:
+        if key not in data:
+            print(f"    FAIL: missing key {key!r}")
+            ok = False
+    if data.get("rejected_reports") == 0 or data.get("stale_tasks") == 0:
+        print("    FAIL: rejected_reports/stale_tasks must not be fake zeroes")
+        ok = False
+    return ok
+
+
+def make_inbox_with_report_and_no_cal():
+    """Create an inbox with a report waiting but no CAL configured in AGENT_ROSTER.md."""
+    tmpdir = tempfile.mkdtemp(prefix="afc-snapshot-test-")
+    # Create a task (active)
+    task_path = os.path.join(tmpdir, "task-Worker-task1.md")
+    with open(task_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("""---
+schema: agent-file-coordination/task
+schema_version: 0.1.0
+task_id: test-task
+agent_name: Worker
+role: implementer
+protocol_mode: task-only
+coordinator_authority: no
+status: RUNNING
+permission_scope:
+  read_files: yes
+  write_reports: yes
+workspace:
+  mode: read_only_shared
+  path: <PROJECT_ROOT>
+  may_create_worktree: no
+validation_tier: no-test-needed
+report_path: <PROJECT_ROOT>/.agent-inbox/report-Worker-task1.md
+created_at: 2026-06-28
+---
+# Test Task
+""")
+    # Create a report (so reports_waiting is true)
+    report_path = os.path.join(tmpdir, "report-Worker-task1.md")
+    with open(report_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("""---
+schema: agent-file-coordination/report
+schema_version: 0.1.0
+task_id: test-task
+agent_name: Worker
+verdict: GO
+changed_files: []
+evidence_refs: [task-Worker-task1.md]
+evidence_trust: {trust_level: referenced, untrusted_inputs_seen: no}
+guardrails: {permission_scope_expanded: no, secrets_private_data_printed: no}
+validation: {tier: no-test-needed, result: not_run}
+reported_at: 2026-06-28
+---
+# Report
+Work completed.
+""")
+    # Create AGENT_ROSTER.md WITHOUT Cal PREFS block (so no CAL recorded)
+    roster_path = os.path.join(tmpdir, "AGENT_ROSTER.md")
+    with open(roster_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("""---
+schema: agent-file-coordination/roster
+schema_version: 0.1.0
+version: 1
+---
+# Agent Roster
+
+""")
+    return tmpdir, report_path
+
+
+def test_next_action_report_priority_over_cal():
+    """Report waiting takes priority over missing CAL in next-action mode."""
+    inbox, report_path = make_inbox_with_report_and_no_cal()
+    try:
+        ok, stdout, _ = run(["--next-action", "--json", inbox], label="report-priority-over-cal")
+        if not ok:
+            return False
+        data = json.loads(stdout)
+        # Report exists, so action should be review_report, not ask_cal
+        if data["recommended_next_action"] != "review_report":
+            print(f"    FAIL: expected recommended_next_action='review_report', got {data['recommended_next_action']!r}")
+            print(f"    cal_default_recorded={data['cal_default_recorded']}, new_reports={data['new_reports']}")
+            return False
+        # Should still report CAL not recorded as advisory data
+        if data["cal_default_recorded"] is not False:
+            print(f"    FAIL: expected cal_default_recorded=False, got {data['cal_default_recorded']!r}")
+            return False
+        return True
+    finally:
+        shutil.rmtree(inbox, ignore_errors=True)
+
+
 def main():
     print("Running afc-snapshot.py fixture tests...")
     print()
@@ -193,6 +318,9 @@ def main():
         test_brief_snapshot,
         test_active_size_ignores_archive_and_artifacts,
         test_active_size_zero_without_active_working_set,
+        test_next_action_text,
+        test_next_action_json,
+        test_next_action_report_priority_over_cal,
     ]:
         try:
             ok = test_fn()

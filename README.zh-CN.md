@@ -93,7 +93,7 @@ report_path: .agent-inbox/report-Reviewer-guardrail-audit.md
 
 ```powershell
 git clone https://github.com/windeternity/delegator-skill.git
-$dest = "$env:USERPROFILE\.codex\skills\delegator"
+$dest = "$env:USERPROFILE\.codex\skills\agent-file-coordination"
 New-Item -ItemType Directory -Path $dest -Force | Out-Null
 Get-ChildItem .\delegator-skill -Force |
   Where-Object { $_.Name -notin @(".git", ".github", ".claude", ".codex", ".agent-inbox") } |
@@ -111,7 +111,7 @@ rsync -a --delete \
   --exclude='.claude' \
   --exclude='.codex' \
   --exclude='.agent-inbox' \
-  delegator-skill/ ~/.codex/skills/delegator/
+  delegator-skill/ ~/.codex/skills/agent-file-coordination/
 ```
 
 如果其他工具要承担主控职责，并且支持自定义 skill、prompt 或 context 目录，把 `SKILL.md`、`references/` 和 `docs/CODEX_FIRST_OPERATING_MODEL.md` 复制到对应目录即可。
@@ -136,7 +136,7 @@ Use the Delegator skill. Create a demo two-agent plan for a read-only review and
 
 合格结果应包含：明确的 `Agent Name`、`Permission Scope`、`Workspace Mode`、`Guardrails`、`Acceptance Criteria`、`Report Path`、结果报告可信度字段，且不硬编码路径或厂商名称。
 
-**首次委派**时，Agent 会面谈一次，把你的配置（可用的 worker/CLI、模型偏好、自动化级别）写入项目本地名册并在后续复用。它需要什么取决于自动化级别——CAL-1/CAL-2 接受任何你人工转交的 worker；CAL-3 要求有经过验证的可调用 CLI。见 [首次运行](docs/FIRST_RUN.md)。
+**首次触发 Skill** 时，Agent 会把 CAL 和 worker 默认配置写入安装目录内的 `LOCAL_ROSTER.md`，供各项目复用；项目名册仅作为显式覆盖。CAL-1/CAL-2 接受你人工转交的外部 worker；CAL-3 要求经过验证的可调用 CLI。见 [首次运行](docs/FIRST_RUN.md)。
 
 ### 验证
 

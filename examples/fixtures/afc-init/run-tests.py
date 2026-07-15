@@ -285,10 +285,13 @@ def test_create_from_scratch(runner, runner_fn, label):
     tmp = make_fresh_project(runner, label)
     try:
         exit_code, out, err = runner_fn(tmp, date_value=CREATED_AT, force=False)
+        if exit_code is None:
+            runner.skip(f"{label}: create-inbox", "runner unavailable (pwsh/bash missing)")
+            return
         runner.check(
             f"{label}: create-inbox exit=0",
             exit_code == 0,
-            f"exit={exit_code} stdout={out[:200]} stderr={err[:200]}",
+            f"exit={exit_code} stdout={(out or '')[:200]} stderr={(err or '')[:200]}",
         )
         if exit_code == 0:
             # The inbox files live on the Windows drive; from this
@@ -360,10 +363,13 @@ def test_missing_project_root(runner, runner_fn, label, missing_path):
     """Missing project root should exit 1."""
     print(f"\n[{label}] missing project root -> exit 1")
     exit_code, out, err = runner_fn(missing_path, date_value=CREATED_AT, force=False)
+    if exit_code is None:
+        runner.skip(f"{label}: missing-root", "runner unavailable (pwsh/bash missing)")
+        return
     runner.check(
         f"{label}: missing-root exit=1",
         exit_code == 1,
-        f"exit={exit_code} stderr={err[:200]}",
+        f"exit={exit_code} stderr={(err or '')[:200]}",
     )
 
 
@@ -373,10 +379,13 @@ def test_invalid_date(runner, runner_fn, label):
     tmp = make_fresh_project(runner, label)
     try:
         exit_code, out, err = runner_fn(tmp, date_value="not-a-date", force=False)
+        if exit_code is None:
+            runner.skip(f"{label}: bad-date", "runner unavailable (pwsh/bash missing)")
+            return
         runner.check(
             f"{label}: bad-date exit=1",
             exit_code == 1,
-            f"exit={exit_code} stderr={err[:200]}",
+            f"exit={exit_code} stderr={(err or '')[:200]}",
         )
     finally:
         cleanup(tmp)
@@ -388,10 +397,13 @@ def test_unknown_flag(runner, runner_fn, label, unknown_flag, expect_exit=2):
     'nonzero, with an error message'."""
     print(f"\n[{label}] unknown flag -> exit {expect_exit}")
     exit_code, out, err = runner_fn(os.getcwd(), date_value=None, force=unknown_flag)
+    if exit_code is None:
+        runner.skip(f"{label}: unknown-flag", "runner unavailable (pwsh/bash missing)")
+        return
     runner.check(
         f"{label}: unknown-flag exit={expect_exit}",
         exit_code == expect_exit,
-        f"exit={exit_code} stderr={err[:200]}",
+        f"exit={exit_code} stderr={(err or '')[:200]}",
     )
 
 
@@ -399,15 +411,18 @@ def test_help(runner, runner_fn, label, help_flag):
     """--help / -? should exit 0 and print usage text."""
     print(f"\n[{label}] help -> exit 0")
     exit_code, out, err = runner_fn(os.getcwd(), date_value=None, force=help_flag)
+    if exit_code is None:
+        runner.skip(f"{label}: help", "runner unavailable (pwsh/bash missing)")
+        return
     runner.check(
         f"{label}: help exit=0",
         exit_code == 0,
-        f"exit={exit_code} stderr={err[:200]}",
+        f"exit={exit_code} stderr={(err or '')[:200]}",
     )
     runner.check(
         f"{label}: help mentions 'usage'",
         "usage" in out.lower(),
-        f"stdout did not contain 'usage': {out[:200]}",
+        f"stdout did not contain 'usage': {(out or '')[:200]}",
     )
 
 

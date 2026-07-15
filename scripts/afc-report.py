@@ -16,9 +16,7 @@ from afc_validation import (
     validate_report_schema,
 )
 from afc_frontmatter import parse_frontmatter_nested
-
-
-REPORT_BUDGET_BYTES = 3 * 1024
+from afc_constants import REPORT_BUDGET_BYTES
 
 # Placeholder text the worker must replace before a report is accepted.
 TODO_RE = re.compile(r'\bTODO\b', re.IGNORECASE)

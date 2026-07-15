@@ -1,14 +1,35 @@
 # Quickstart
 
-Before hydration or roster reads, route the task:
+> **First successful loop?** Read the [Minimal Loop](MINIMAL_LOOP.md) first. It walks through five steps, four files, and zero chat relay using the existing demo files.
+
+Before routing, run the literal first-command CAL presence check:
 
 ```powershell
-python -B scripts\afc-route.py --estimated-direct-minutes <N> --independent-workstreams <N> --smallest-workstream-minutes <N> --specialized-capability <yes|no> --high-risk-independent-review <yes|no> --external-worker-required <yes|no> --semantic-change <yes|no> --expected-rounds <N> --context-bytes <N>
+python -B scripts\afc-first-run-config.py --check-only
 ```
 
-`DIRECT` stops here. `LITE` uses `afc-lite.py` and creates no inbox. Only
+If it returns `NOT_CONFIGURED` with `next_action: ASK_CAL`, complete the one-time
+user-profile CAL choice before continuing. Next compute blast radius, then route:
+
+```powershell
+python -B scripts\afc-blast-radius.py --files <declared paths>
+```
+
+```powershell
+python -B scripts\afc-route.py --estimated-direct-minutes <N> --independent-workstreams <N> --smallest-workstream-minutes <N> --specialized-capability <yes|no> --high-risk-independent-review <yes|no> --external-worker-required <yes|no> --semantic-change <yes|no> --expected-rounds <N> --context-bytes <N> --blast-radius <low|medium|high>
+```
+
+`DIRECT` stops here. `LITE` uses `afc-lite.py` and creates no task/status/event
+artifacts, but still checks the roster before emitting a handoff. Only
 `FULL` continues with the workflow below. See
 `references/delegation-routing-v1.md`.
+
+Before any `LITE`, `FULL`, or CAL external dispatch, the resolved roster must be
+usable: install-local `LOCAL_ROSTER.md` by default, or an explicitly marked
+project override. Missing, placeholder-only, incomplete, or unmatched rosters
+block dispatch. While Delegator is active, never use a current-session
+subagent, built-in helper, or internal `multi_agent` call for exploration,
+review, implementation, or fallback.
 
 For MOA review, design, patch comparison, or synthesis, keep the route as
 `FULL` and add `coordination_mode` metadata inside task/report files. See
@@ -66,22 +87,33 @@ bash scripts/afc-init.sh --project-root . --created-at <YYYY-MM-DD>
 
 Both bootstrap scripts create `.agent-inbox/AGENT_ROSTER.md`, `STATUS.md`, `WORKTREE_LOCKS.md`, and `events.jsonl`. They refuse to overwrite existing files unless you pass `-Force` in PowerShell or `--force` in shell.
 
-## 3. Create The Roster
+## 3. Create An Optional Project Roster Override
 
-Copy `templates/TEMPLATE_ROSTER.md` to `.agent-inbox/AGENT_ROSTER.md` and fill in your project-local values.
+The default roster belongs in the installed Skill's `LOCAL_ROSTER.md`. Copy
+`templates/TEMPLATE_ROSTER.md` to `.agent-inbox/AGENT_ROSTER.md` only when this
+project needs different routes, add the exact
+`AFC_ROSTER_SCOPE: project-override` marker described in the template, and fill
+in the project-local values.
 
 If you used `afc-init`, edit the generated `.agent-inbox/AGENT_ROSTER.md` instead of copying the template manually.
+
+The template is not a usable roster until all worker placeholders are replaced.
+CAL-1/CAL-2 workers may be user-relayed external chats/tools/sessions, but they
+still need concrete roster rows, permission limits, and report-writing
+expectations. CAL-3 workers additionally need callable invoke recipes and probe
+verification.
 
 On first use, run a compact resource discovery gate before the first external
 dispatch. Confirm the user's existing tools, actually available tools,
 providers/accounts or local runtimes, model preference order, avoid list,
 capability limits, and default CAL level. Record the answer in the
-project-local roster and event log. After that, keep using the recorded default
-until the user asks to change it, a route becomes unavailable, or the requested
-task needs an unrecorded capability.
+resolved roster; write a project event only for an explicit project override.
+After that, keep using the recorded default until the user asks to change it, a
+route becomes unavailable, or the requested task needs an unrecorded capability.
 
-User-specific worker names, model labels, and CLI aliases belong in this
-project-local roster or local invoke recipes. They are not public defaults.
+User-specific worker names, model labels, and CLI aliases belong in the
+install-local roster, an explicit project override, or local invoke recipes.
+They are not public defaults.
 
 ```markdown
 ---
@@ -496,7 +528,9 @@ package rather than a working checkout that carries local state.
 
 ## 10. Coordination Automation Levels (CAL)
 
-Choose a Coordination Automation Level once, at the first skill trigger for a project (recorded and reused until changed):
+Choose a Coordination Automation Level once per install-local user profile at
+the first skill trigger; each later coordinator session presence-checks and
+reuses it:
 
 | Level | Name | What the user relays | What the coordinator automates | Current posture |
 |---|---|---|---|---|

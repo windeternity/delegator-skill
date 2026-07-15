@@ -49,35 +49,18 @@ import time
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
-try:
-    from afc_event import (
-        add_event_context,
-        append_event_once,
-        report_event_id,
-    )
-except ModuleNotFoundError:
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from afc_event import (
-        add_event_context,
-        append_event_once,
-        report_event_id,
-    )
-
-try:
-    from afc_validation import validate_report_schema
-except ModuleNotFoundError:
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from afc_validation import validate_report_schema
-try:
-    from afc_fsutil import atomic_write, sweep_stale_tmp
-except ModuleNotFoundError:
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from afc_fsutil import atomic_write, sweep_stale_tmp
-try:
-    from afc_frontmatter import parse_frontmatter_nested, extract_structured_frontmatter
-except ModuleNotFoundError:
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from afc_frontmatter import parse_frontmatter_nested, extract_structured_frontmatter
+# Ensure scripts/ is importable whether afc-watch is run directly or
+# imported, then import siblings once (replaces one try/except per module).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from afc_event import (
+    add_event_context,
+    append_event_once,
+    report_event_id,
+)
+from afc_validation import validate_report_schema
+from afc_fsutil import atomic_write, sweep_stale_tmp
+from afc_frontmatter import parse_frontmatter_nested, extract_structured_frontmatter
+from afc_constants import CLOSED_STATUSES
 
 
 # ---------------------------------------------------------------------------
@@ -351,14 +334,6 @@ def _validate_report(filepath, inbox_dir=None, task_index=None):
 # Staleness detection
 # ---------------------------------------------------------------------------
 
-CLOSED_STATUSES = {
-    "CLOSED_GO",
-    "CLOSED_PARTIAL",
-    "CLOSED_RED",
-    "CANCELLED",
-    "SUPERSEDED",
-}
-
 
 def _script_path(filename):
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
@@ -625,7 +600,18 @@ def _reject_expected(json_mode, filepath, filename, mtime, reasons,
         "status": "rejected",
         "rejection_reasons": reasons,
     }
-    _save_state(state_file, next_state)
+    if not _save_state(state_file, next_state):
+        _emit(
+            json_mode,
+            "error",
+            None,
+            "cannot persist rejected-report state to {}: os.replace() failed after retries".format(
+                state_file
+            ),
+            filepath,
+            None,
+        )
+        return False
 
     # Emit REPORT_REJECTED event
     occurred_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -666,6 +652,7 @@ def _reject_expected(json_mode, filepath, filename, mtime, reasons,
     _emit(json_mode, "report_rejected", task_id,
           "{} rejected: {}".format(filename, reasons_text),
           filepath, reasons)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1209,18 +1196,20 @@ def _run_expected_report_watch(inbox_dir, expected_report_path,
                 reasons = ["parse error: {}".format(parse_err)]
             else:
                 reasons = ["no frontmatter" if report_data is None else "empty frontmatter"]
-            _reject_expected(
+            if not _reject_expected(
                 json_mode, expected_report_path, expected_report_filename,
                 mtime, reasons, prev_state, state_file, inbox_dir,
-            )
+            ):
+                return 1
             return 3
 
         if report_data.get("schema") != "agent-file-coordination/report":
             reasons = ["wrong schema: {}".format(report_data.get("schema"))]
-            _reject_expected(
+            if not _reject_expected(
                 json_mode, expected_report_path, expected_report_filename,
                 mtime, reasons, prev_state, state_file, inbox_dir,
-            )
+            ):
+                return 1
             return 3
 
         # Cross-check: expected-task-id
@@ -1229,10 +1218,11 @@ def _run_expected_report_watch(inbox_dir, expected_report_path,
         if expected_task_id and report_task_id != expected_task_id:
             reasons = ["task_id mismatch: expected '{}', got '{}'".format(
                 expected_task_id, report_task_id)]
-            _reject_expected(
+            if not _reject_expected(
                 json_mode, expected_report_path, expected_report_filename,
                 mtime, reasons, prev_state, state_file, inbox_dir,
-            )
+            ):
+                return 1
             return 3
 
         # Full schema validation. Pass the matching task's full frontmatter so
@@ -1243,10 +1233,11 @@ def _run_expected_report_watch(inbox_dir, expected_report_path,
             report_data, body=report_body, task=task_for_check
         )
         if not is_valid:
-            _reject_expected(
+            if not _reject_expected(
                 json_mode, expected_report_path, expected_report_filename,
                 mtime, reasons, prev_state, state_file, inbox_dir,
-            )
+            ):
+                return 1
             return 3
 
         # Valid! Update state (only for this one file) and emit report_ready.

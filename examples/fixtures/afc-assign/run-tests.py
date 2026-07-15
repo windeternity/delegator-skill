@@ -6,16 +6,19 @@ with the project validator. Returns exit 0 when all checks pass.
 """
 
 import json
+import importlib.util
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 
 SCRIPT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "scripts", "afc-assign.py"))
 VALIDATOR = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "scripts", "validate-agent-inbox.py"))
 AFC_STATUS = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "scripts", "afc-status.py"))
 FIXTURES = os.path.dirname(os.path.abspath(__file__))
+TEMPLATE_ROSTER = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "templates", "TEMPLATE_ROSTER.md"))
 
 PASS = 0
 FAIL = 0
@@ -26,7 +29,81 @@ def _temp_inbox(name):
     """Create and return a temp subdirectory under _SHARED_TEMP for a test."""
     path = os.path.join(_SHARED_TEMP, name)
     os.makedirs(path, exist_ok=True)
+    write_usable_roster(path)
     return path
+
+
+def write_usable_roster(inbox, agents=None, default_cal="CAL-1"):
+    if agents is None:
+        agents = [
+            "DocsWorker",
+            "TestWorker",
+            "ReleaseBot",
+            "SeqWorker",
+            "ExistingWorker",
+        ]
+    rows = []
+    for agent in agents:
+        rows.append(
+            "| {agent} | implementer | external-chat | user-relay-model | user-relay:{agent} | task-only | no | yes | tests_only | yes | no | manual_needed | fixture work | none | external user-relay worker |".format(
+                agent=agent
+            )
+        )
+    text = """---
+schema: agent-file-coordination/roster
+schema_version: 0.1.0
+---
+
+# Agent Roster
+
+<!-- SESSION PREFERENCES
+Default CAL: {default_cal}
+Execution preference: fixture external workers
+Available resources: external user-relay workers
+Available now: {agents}
+Model preference order: fixture model
+Avoid / unavailable: none
+Smoke tests: fixture
+Confirmed: 2026-06-29
+Change policy: keep these defaults until the user asks to change them or a route becomes unavailable.
+-->
+
+| Agent Name | Role | Tool | Model | Provider / Access Path | Protocol Mode | Coordinator Authority | Can Edit | Can Run Commands | Can Write Reports | Browser / Visual | Worktree Capability | Best Use | Avoid | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Coordinator | coordinator | codex | coordinator-model | local coordinator | full-skill | yes | yes | bounded | yes | yes | can_use_existing | task decomposition, evidence review, final verdict | routine worker loops | fixture coordinator |
+{rows}
+""".format(default_cal=default_cal, agents=", ".join(agents), rows="\n".join(rows))
+    with open(os.path.join(inbox, "AGENT_ROSTER.md"), "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+
+
+def write_internal_route_roster(inbox, agent="DocsWorker", tool="current-session subagent"):
+    text = """---
+schema: agent-file-coordination/roster
+schema_version: 0.1.0
+---
+
+# Agent Roster
+
+<!-- SESSION PREFERENCES
+Default CAL: CAL-1
+Execution preference: invalid internal route fixture
+Available resources: {tool}
+Available now: {agent}
+Model preference order: fixture model
+Avoid / unavailable: none
+Smoke tests: fixture
+Confirmed: 2026-06-29
+Change policy: keep these defaults until the user asks to change them or a route becomes unavailable.
+-->
+
+| Agent Name | Role | Tool | Model | Provider / Access Path | Protocol Mode | Coordinator Authority | Can Edit | Can Run Commands | Can Write Reports | Browser / Visual | Worktree Capability | Best Use | Avoid | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Coordinator | coordinator | codex | coordinator-model | local coordinator | full-skill | yes | yes | bounded | yes | yes | can_use_existing | task decomposition, evidence review, final verdict | routine worker loops | fixture coordinator |
+| {agent} | implementer | {tool} | helper-model | coordinator runtime | task-only | no | yes | tests_only | yes | no | manual_needed | fixture work | none | built-in helper inside coordinator runtime |
+""".format(agent=agent, tool=tool)
+    with open(os.path.join(inbox, "AGENT_ROSTER.md"), "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
 
 
 def run(label, cmd, expect_exit=0, env=None):
@@ -48,6 +125,10 @@ def run(label, cmd, expect_exit=0, env=None):
     else:
         PASS += 1
     return r
+
+
+def non_roster_files(inbox):
+    return sorted(name for name in os.listdir(inbox) if name != "AGENT_ROSTER.md")
 
 
 def test_valid_generates_valid_task():
@@ -115,6 +196,100 @@ def test_valid_generates_valid_task():
         print("  [FAIL] valid: handoff missing inbox path gate")
 
 
+def test_roster_missing_blocks_full_assignment():
+    """FULL task generation blocks before writing files when roster is missing."""
+    global PASS, FAIL
+    inbox = os.path.join(_SHARED_TEMP, "roster-missing")
+    os.makedirs(inbox, exist_ok=True)
+    spec = os.path.join(FIXTURES, "valid", "spec.yaml")
+    r = run("roster-missing: blocks full assignment", [sys.executable, "-B", SCRIPT, "--spec", spec, "--inbox", inbox, "--created-at", "2026-06-29"], expect_exit=1)
+    if "ROSTER_BLOCKED" not in r.stderr or "missing" not in r.stderr:
+        FAIL += 1
+        print("  [FAIL] roster-missing: stderr missing roster block")
+    if os.listdir(inbox):
+        FAIL += 1
+        print("  [FAIL] roster-missing: files were written: {}".format(os.listdir(inbox)))
+
+
+def test_roster_placeholder_blocks_full_assignment():
+    """Template-only roster is not usable for FULL task generation."""
+    global PASS, FAIL
+    inbox = os.path.join(_SHARED_TEMP, "roster-placeholder")
+    os.makedirs(inbox, exist_ok=True)
+    with open(TEMPLATE_ROSTER, encoding="utf-8") as f:
+        template = f.read()
+    with open(os.path.join(inbox, "AGENT_ROSTER.md"), "w", encoding="utf-8", newline="\n") as f:
+        f.write(template)
+    spec = os.path.join(FIXTURES, "valid", "spec.yaml")
+    r = run("roster-placeholder: blocks full assignment", [sys.executable, "-B", SCRIPT, "--spec", spec, "--inbox", inbox, "--created-at", "2026-06-29"], expect_exit=1)
+    if "placeholder_only" not in r.stderr:
+        FAIL += 1
+        print("  [FAIL] roster-placeholder: stderr missing placeholder_only")
+    if non_roster_files(inbox):
+        FAIL += 1
+        print("  [FAIL] roster-placeholder: task artifacts were written: {}".format(non_roster_files(inbox)))
+
+
+def test_roster_incomplete_blocks_full_assignment():
+    """Roster with CAL but no worker route is incomplete."""
+    global PASS, FAIL
+    inbox = os.path.join(_SHARED_TEMP, "roster-incomplete")
+    os.makedirs(inbox, exist_ok=True)
+    write_usable_roster(inbox, agents=[])
+    spec = os.path.join(FIXTURES, "valid", "spec.yaml")
+    r = run("roster-incomplete: blocks full assignment", [sys.executable, "-B", SCRIPT, "--spec", spec, "--inbox", inbox, "--created-at", "2026-06-29"], expect_exit=1)
+    if "incomplete" not in r.stderr or "usable external" not in r.stderr:
+        FAIL += 1
+        print("  [FAIL] roster-incomplete: stderr missing incomplete reason")
+    if non_roster_files(inbox):
+        FAIL += 1
+        print("  [FAIL] roster-incomplete: task artifacts were written: {}".format(non_roster_files(inbox)))
+
+
+def test_unmatched_worker_alias_blocks_no_subagent_fallback():
+    """A worker missing from the roster must not fall back to a current-session helper."""
+    global PASS, FAIL
+    inbox = os.path.join(_SHARED_TEMP, "roster-unmatched")
+    os.makedirs(inbox, exist_ok=True)
+    write_usable_roster(inbox, agents=["OtherWorker"])
+    spec = os.path.join(FIXTURES, "valid", "spec.yaml")
+    r = run("roster-unmatched: blocks full assignment", [sys.executable, "-B", SCRIPT, "--spec", spec, "--inbox", inbox, "--created-at", "2026-06-29"], expect_exit=1)
+    if "DocsWorker" not in r.stderr or "not a usable external roster route" not in r.stderr:
+        FAIL += 1
+        print("  [FAIL] roster-unmatched: stderr missing unmatched worker reason")
+    if non_roster_files(inbox):
+        FAIL += 1
+        print("  [FAIL] roster-unmatched: task artifacts were written: {}".format(non_roster_files(inbox)))
+
+
+def test_matched_internal_worker_route_blocks_no_artifacts():
+    """A matching roster row that points to a current-session subagent is invalid."""
+    global PASS, FAIL
+    inbox = os.path.join(_SHARED_TEMP, "roster-internal-route")
+    os.makedirs(inbox, exist_ok=True)
+    write_internal_route_roster(inbox, agent="DocsWorker")
+    spec = os.path.join(FIXTURES, "valid", "spec.yaml")
+    r = run("roster-internal-route: blocks full assignment", [sys.executable, "-B", SCRIPT, "--spec", spec, "--inbox", inbox, "--created-at", "2026-06-29"], expect_exit=1)
+    if "ROSTER_BLOCKED" not in r.stderr or "current-session subagent" not in r.stderr:
+        FAIL += 1
+        print("  [FAIL] roster-internal-route: stderr missing internal route block")
+    if non_roster_files(inbox):
+        FAIL += 1
+        print("  [FAIL] roster-internal-route: task artifacts were written: {}".format(non_roster_files(inbox)))
+
+
+def test_builtin_subagent_alias_blocks_no_artifacts():
+    inbox = os.path.join(_SHARED_TEMP, "roster-builtin-subagent-route")
+    os.makedirs(inbox, exist_ok=True)
+    spec = os.path.join(FIXTURES, "valid", "spec.yaml")
+    write_internal_route_roster(inbox, agent="DocsWorker", tool="built-in subagent")
+    r = run("roster-builtin-subagent-route: blocks full assignment", [sys.executable, "-B", SCRIPT, "--spec", spec, "--inbox", inbox, "--created-at", "2026-06-29"], expect_exit=1)
+    if "ROSTER_BLOCKED" not in r.stderr:
+        raise AssertionError(r.stderr)
+    if non_roster_files(inbox):
+        raise AssertionError("internal route wrote artifacts: {}".format(non_roster_files(inbox)))
+
+
 def test_status_semantics():
     """Generated task shows ASSIGNED/wait_for_report via afc-status dry-run."""
     global PASS, FAIL
@@ -154,7 +329,7 @@ def test_dry_run_no_files():
     if r.returncode != 0:
         return
 
-    files = os.listdir(inbox)
+    files = non_roster_files(inbox)
     if files:
         FAIL += 1
         print(f"  [FAIL] dry-run: files were written: {files}")
@@ -200,7 +375,7 @@ def test_missing_field_fails():
     r = run("missing-field: fails", [sys.executable, "-B", SCRIPT, "--spec", spec, "--inbox", inbox, "--created-at", "2026-06-08"], expect_exit=1)
 
     # No files should be written
-    files = os.listdir(inbox)
+    files = non_roster_files(inbox)
     if files:
         FAIL += 1
         print(f"  [FAIL] missing-field: files were written: {files}")
@@ -221,7 +396,7 @@ def test_invalid_enum_fails():
     spec = os.path.join(FIXTURES, "invalid-enum", "spec.yaml")
     r = run("invalid-enum: fails", [sys.executable, "-B", SCRIPT, "--spec", spec, "--inbox", inbox, "--created-at", "2026-06-08"], expect_exit=1)
 
-    files = os.listdir(inbox)
+    files = non_roster_files(inbox)
     if files:
         FAIL += 1
         print(f"  [FAIL] invalid-enum: files were written: {files}")
@@ -279,7 +454,7 @@ def test_invalid_date_in_spec():
     spec = os.path.join(FIXTURES, "invalid-date", "spec.yaml")
     r = run("invalid-date (spec): fails", [sys.executable, "-B", SCRIPT, "--spec", spec, "--inbox", inbox, "--created-at", "2026-06-08"], expect_exit=1)
 
-    files = os.listdir(inbox)
+    files = non_roster_files(inbox)
     if files:
         FAIL += 1
         print(f"  [FAIL] invalid-date (spec): files were written: {files}")
@@ -299,7 +474,7 @@ def test_invalid_date_cli_flag():
     spec = os.path.join(FIXTURES, "invalid-date", "spec-no-date.yaml")
     r = run("invalid-date (cli): fails", [sys.executable, "-B", SCRIPT, "--spec", spec, "--inbox", inbox, "--created-at", "not-a-date"], expect_exit=1)
 
-    files = os.listdir(inbox)
+    files = non_roster_files(inbox)
     if files:
         FAIL += 1
         print(f"  [FAIL] invalid-date (cli): files were written: {files}")
@@ -319,7 +494,7 @@ def test_unsafe_id_fails():
     spec = os.path.join(FIXTURES, "unsafe-id", "spec.yaml")
     r = run("unsafe-id: fails", [sys.executable, "-B", SCRIPT, "--spec", spec, "--inbox", inbox, "--created-at", "2026-06-08"], expect_exit=1)
 
-    files = os.listdir(inbox)
+    files = non_roster_files(inbox)
     if files:
         FAIL += 1
         print(f"  [FAIL] unsafe-id: files were written: {files}")
@@ -405,7 +580,7 @@ def test_unsupported_lang_no_template_fails():
         FAIL += 1
         print("  [FAIL] unsupported-lang: English handoff produced for unsupported language")
     # Must NOT write any files
-    files = os.listdir(inbox)
+    files = non_roster_files(inbox)
     if files:
         FAIL += 1
         print(f"  [FAIL] unsupported-lang: files were written: {files}")
@@ -720,7 +895,7 @@ def test_sequence_invalid():
     spec = os.path.join(FIXTURES, "sequence-invalid", "spec.yaml")
     r = run("sequence-invalid: fails", [sys.executable, "-B", SCRIPT, "--spec", spec, "--inbox", inbox, "--created-at", "2026-06-13"], expect_exit=1)
 
-    files = os.listdir(inbox)
+    files = non_roster_files(inbox)
     if files:
         FAIL += 1
         print(f"  [FAIL] sequence-invalid: files were written: {files}")
@@ -801,6 +976,60 @@ def test_sequence_absent_auto_allocates():
     else:
         FAIL += 1
         print("  [FAIL] sequence-absent: missing 'Do not commit or push.'")
+
+
+def test_sequence_reservation_is_concurrent_safe():
+    global PASS, FAIL
+    inbox = _temp_inbox("sequence-concurrent")
+    scripts_dir = os.path.dirname(SCRIPT)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    spec = importlib.util.spec_from_file_location("afc_assign_concurrency", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    values = []
+    lock = threading.Lock()
+
+    def reserve():
+        value = module.reserve_sequence(inbox)
+        with lock:
+            values.append(value)
+
+    threads = [threading.Thread(target=reserve) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    ok = sorted(values) == list(range(1, 9))
+    if ok:
+        PASS += 1
+        print("  [PASS] sequence-concurrent: unique reservations")
+    else:
+        FAIL += 1
+        print("  [FAIL] sequence-concurrent: values={}".format(values))
+
+
+def test_sequence_reservation_recovers_dead_owner_lock():
+    global PASS, FAIL
+    inbox = _temp_inbox("sequence-abandoned-lock")
+    scripts_dir = os.path.dirname(SCRIPT)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    spec = importlib.util.spec_from_file_location("afc_assign_abandoned_lock", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    lock_path = os.path.join(inbox, module.SEQUENCE_LOCK_FILENAME)
+    with open(lock_path, "w", encoding="ascii") as handle:
+        handle.write("99999999\n")
+    value = module.reserve_sequence(inbox)
+    ok = value == 1 and not os.path.exists(lock_path)
+    if ok:
+        PASS += 1
+        print("  [PASS] sequence-abandoned-lock: reclaimed dead owner")
+    else:
+        FAIL += 1
+        print("  [FAIL] sequence-abandoned-lock: value={} lock_exists={}".format(
+            value, os.path.exists(lock_path)))
 
 
 def test_attribution_fields_in_event():
@@ -895,6 +1124,12 @@ def main():
     _SHARED_TEMP = tempfile.mkdtemp(prefix="afc_assign_test_")
     try:
         test_valid_generates_valid_task()
+        test_roster_missing_blocks_full_assignment()
+        test_roster_placeholder_blocks_full_assignment()
+        test_roster_incomplete_blocks_full_assignment()
+        test_unmatched_worker_alias_blocks_no_subagent_fallback()
+        test_matched_internal_worker_route_blocks_no_artifacts()
+        test_builtin_subagent_alias_blocks_no_artifacts()
         test_status_semantics()
         test_dry_run_no_files()
         test_existing_file_fails()
@@ -918,6 +1153,8 @@ def main():
         test_sequence_invalid()
         test_sequence_zh()
         test_sequence_absent_auto_allocates()
+        test_sequence_reservation_is_concurrent_safe()
+        test_sequence_reservation_recovers_dead_owner_lock()
         test_attribution_fields_in_event()
         test_attribution_absent_byte_compatible()
     finally:

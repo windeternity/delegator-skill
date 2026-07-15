@@ -13,17 +13,11 @@ from afc_event import append_event_once
 from afc_frontmatter import parse_frontmatter_structured as parse_frontmatter
 from afc_inbox_validation import format_validation_result, validate_paths
 from afc_routing import MAX_EXPECTED_ROUNDS
-
-
-REPORT_BUDGET_BYTES = 3 * 1024
-REVIEW_REPORT_BUDGET_BYTES = 5 * 1024
-CLOSED_STATUSES = {
-    "CLOSED_GO",
-    "CLOSED_PARTIAL",
-    "CLOSED_RED",
-    "CANCELLED",
-    "SUPERSEDED",
-}
+from afc_constants import (
+    CLOSED_STATUSES,
+    REPORT_BUDGET_BYTES,
+    REVIEW_REPORT_BUDGET_BYTES,
+)
 
 REPAIR_HINTS = {
     "REPORT_MISSING": "write the declared report_path with afc-report.py",

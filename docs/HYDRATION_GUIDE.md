@@ -8,26 +8,36 @@ The `templates/` directory contains reusable, model-agnostic, vendor-neutral tem
 
 Hydration is the process of replacing those placeholders with your project-local agent roster, paths, preferences, and coordination state.
 
+Placeholder values are valid only while editing templates. A roster that still
+contains placeholder worker routes is not usable for `LITE`, `FULL`, or CAL
+dispatch. Installing Delegator also does not create external workers: a
+current-session subagent, built-in helper, or internal `multi_agent` call is
+not an AFC worker route.
+
 ## When To Hydrate
 
 ### First Use
 
-When you first use Delegator on a new project, hydrate the templates into your
-project's `.agent-inbox/` directory. This establishes the roster, status board,
-worktree locks, event log, the user's available-resource inventory, and the
-default execution-model preference.
+When you first use Delegator on a new project, hydrate task/status/lock/event
+templates into `.agent-inbox/`. Keep the default worker roster and CAL choice in
+the install-local `LOCAL_ROSTER.md`. Hydrate `AGENT_ROSTER.md` only when the
+project needs an explicit override, and add the project-override marker.
 
 ### Repeat Use
 
 Before assigning external agents on an existing project:
 
-1. Read `.agent-inbox/AGENT_ROSTER.md`.
+1. Resolve the roster: install-local `LOCAL_ROSTER.md` by default, or an
+   explicitly marked `.agent-inbox/AGENT_ROSTER.md` override.
 2. Summarize the current roster and preferences to the user.
 3. If no resource inventory or CAL/execution preference is recorded, ask the
    user to choose before dispatch.
 4. Ask whether the roster is still valid, or whether agents, tools, models,
    accounts/runtimes, capabilities, or CAL preference have changed.
 5. If the roster is stale, update it before writing new task files.
+
+For `DIRECT`, do not run this full roster read. Route-first still applies; the
+only permitted pre-route exception is the cheap first-run CAL presence check.
 
 Do not skip this step. Agent availability, model versions, and tool access change frequently.
 
@@ -49,7 +59,7 @@ Before I assign agent tasks, tell me what you currently have available:
 8. Role per agent: coordinator / planner / implementer / reviewer / smoke / docs / research / other.
 9. Which agent is the coordinator or final judge?
 10. Which model/tool pair do you prefer, which fallbacks are acceptable, and which should be avoided for this project?
-11. Which coordination level should be the project default: CAL-1 manual relay, or CAL-2 auto intake with a foreground watcher?
+11. Which coordination level should be the project default: CAL-1 manual relay, CAL-2 auto intake with a foreground watcher, or CAL-3 full auto with verified CLI bindings?
 ```
 
 If the user's message already provides enough information, proceed directly.
@@ -62,11 +72,14 @@ mkdir <PROJECT_ROOT>/.agent-inbox
 
 ### Step 3: Hydrate The Roster
 
-Copy `templates/TEMPLATE_ROSTER.md` to `<PROJECT_ROOT>/.agent-inbox/AGENT_ROSTER.md`.
+For an explicit project override, copy `templates/TEMPLATE_ROSTER.md` to
+`<PROJECT_ROOT>/.agent-inbox/AGENT_ROSTER.md` and add the exact
+`AFC_ROSTER_SCOPE: project-override` marker described in the template. Otherwise configure
+`templates/TEMPLATE_LOCAL_ROSTER.md` once in the installed Skill directory.
 
-User-specific worker names, model labels, and CLI aliases are recorded in this
-project-local roster or in local CAL-3 invoke recipes. Do not add them to the
-public skill defaults.
+User-specific worker names, model labels, and CLI aliases are recorded in the
+install-local roster, an explicit project override, or local CAL-3 invoke
+recipes. Do not add them to published skill sources.
 
 Replace all `<PLACEHOLDER>` values:
 
@@ -109,7 +122,21 @@ Copy `templates/TEMPLATE_STATUS_BOARD.md` to `<PROJECT_ROOT>/.agent-inbox/STATUS
 
 Copy `templates/TEMPLATE_WORKTREE_LOCKS.md` to `<PROJECT_ROOT>/.agent-inbox/WORKTREE_LOCKS.md`.
 
-Replace placeholders. If no tasks are assigned yet, leave the table with one example row or an empty data row.
+Replace placeholders. If no tasks are assigned yet, it is fine to have no
+active task files, but the roster itself must contain at least one concrete
+external worker row before external dispatch.
+
+Roster usability checklist:
+
+- `Default CAL` is a concrete `CAL-1`, `CAL-2`, or `CAL-3`.
+- At least one non-coordinator external worker row is hydrated.
+- Agent name, role, tool/model label, provider/access path, protocol mode,
+  edit/command/report permissions, best use, and avoid/limits are concrete.
+- CAL-1/CAL-2 user-relay routes point to an external chat/tool/model/session,
+  not the coordinator's current-session helper.
+- CAL-3 routes have callable invoke recipes and probe evidence.
+- The worker can write the expected report/evidence path; chat-only "done" is
+  not accepted as completion evidence.
 
 ### Step 5: Create Event Log
 
@@ -187,7 +214,8 @@ If a worker discovers that one of these is required to complete its task, it rep
 
 The roster and project-local preferences are reconfirmed before the first external assignment only when they are missing, stale, contradicted, or the user asks to change them. After confirmation, subsequent assignments only re-validate the specific row used (agent, model, tool) plus any paused-route, CAL, or capability changes the user has called out since the last confirmation. The check itself runs as:
 
-1. Read `.agent-inbox/AGENT_ROSTER.md`.
+1. Read the resolved roster (install-local by default; explicit project
+   override only when marked).
 2. Present a summary to the user:
 
 ```text
@@ -201,7 +229,9 @@ Is this still accurate? Any agents, tools, models, capabilities, or CAL preferen
 
 3. If the user confirms, proceed with task assignment.
 4. If the user reports changes, update the roster and event log before proceeding.
-5. If the roster or default preference is missing, run the full first-use hydration flow.
+5. If the roster or default preference is missing, placeholder-only, incomplete,
+   or unmatched for the selected worker, stop and run the full first-use
+   hydration flow before generating a task or handoff.
 
 ### Paused Routes
 

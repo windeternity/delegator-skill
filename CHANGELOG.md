@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-15
+
+### Added
+
+- Install-local `LOCAL_ROSTER.md` defaults, deterministic roster resolution,
+  and a reusable local-roster template for first-use configuration.
+- A scenario-first Minimal Loop guide plus six public benchmark cases covering
+  direct, LITE, FULL, MOA review, delegation-loss, and CAL-boundary decisions.
+- Shared AFC constants and expanded fixtures for routing, roster resolution,
+  lifecycle handling, synchronization boundaries, and public contracts.
+
+### Changed
+
+- First-use routing now fails closed on built-in/current-session subagent
+  aliases and keeps Delegator focused on explicitly rostered external workers.
+- CAL-3 remains opt-in while adding clearer network/work/approved-commit
+  permission profiles, stronger worker binding, and safer launcher behavior.
+- Coordinator entry points, help output, task generation, snapshot guidance,
+  and public documentation now share the same route-first operating contract.
+
+### Fixed
+
+- CAL-3 heartbeat, abort, timeout, retry, and attempt history now use canonical
+  append-only events instead of losing audit evidence across successful retry.
+- Assignment sequence locks recover abandoned owners safely on Windows and
+  POSIX while preserving concurrent uniqueness and live-owner locks.
+- Private/public CI now validates the correct safety surface and skips
+  source-only maintenance fixtures when they are absent from the public package.
+
+### Security
+
+- GitHub Actions are pinned to immutable SHAs, CI permissions remain
+  `contents: read`, and the public export continues to exclude local state,
+  private review material, maintenance scripts, and public-owned release history.
+
 ## [0.3.0] - 2026-06-27
 
 ### Added

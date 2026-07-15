@@ -13,15 +13,19 @@ Exit codes:
     1   validation failure
 """
 
+import argparse
 import json
 import os
 import re
 import sys
 import tempfile
+import time
 from datetime import date
 
 from afc_event import add_event_context, append_event_once
+from afc_roster import format_roster_block, maybe_warn_roster, require_usable_roster
 from afc_routing import evaluate_route, routing_values_from_spec
+from afc_constants import TASK_BUDGET_BYTES
 
 
 # --- Allowed enum values (must match validate-agent-inbox.py) ---
@@ -37,7 +41,6 @@ RUN_COMMANDS = {"none", "read_only", "tests_only", "bounded"}
 NETWORK_ACCESS = {"none", "docs_only", "allowed"}
 COMMIT_PUSH = {"no", "ask", "approved"}
 VALIDATION_TIERS = {"no-test-needed", "targeted-test", "smoke-test", "browser-test", "full-suite", "production-replay"}
-TASK_BUDGET_BYTES = 4 * 1024
 
 
 _SAFE_NAME_RE = re.compile(r'^[A-Za-z0-9._-]+$')
@@ -72,6 +75,9 @@ def check_command(report_tool_path, task_filepath):
 
 
 SEQUENCE_COUNTER_FILENAME = ".seq"
+SEQUENCE_LOCK_FILENAME = ".seq.lock"
+SEQUENCE_LOCK_TIMEOUT_SECONDS = 5.0
+SEQUENCE_LOCK_POLL_SECONDS = 0.02
 
 
 def _read_sequence_counter(path):
@@ -93,15 +99,132 @@ def peek_sequence(inbox_dir):
     The counter lives at ``<inbox>/.seq`` as a single integer: an O(1) read,
     independent of inbox size, and never archived. Peeking lets the marker be
     embedded in the task/handoff before we know the dispatch will succeed; the
-    number is only persisted by ``commit_sequence`` right before the task file
-    is written, so a failed or dry-run dispatch never burns a number.
+    Dry-run callers may use this advisory value without consuming it. Real
+    assignments must use ``reserve_sequence`` so concurrent processes cannot
+    receive the same marker.
     """
     counter_path = os.path.join(inbox_dir, SEQUENCE_COUNTER_FILENAME)
     return _read_sequence_counter(counter_path) + 1
 
 
-def commit_sequence(inbox_dir, value):
-    """Atomically persist the consumed sequence number. Returns True on success."""
+def _process_is_alive(pid):
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        # Windows os.kill(pid, 0) terminates the target process instead of
+        # performing the POSIX existence probe. Query a process handle instead.
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            kernel32.OpenProcess.restype = ctypes.c_void_p
+            kernel32.OpenProcess.argtypes = (
+                ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32
+            )
+            kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+            handle = kernel32.OpenProcess(0x1000, False, pid)
+            if not handle:
+                # Access denied proves that the process exists even though it
+                # cannot be queried by this coordinator.
+                return kernel32.GetLastError() == 5
+            kernel32.CloseHandle(handle)
+            return True
+        except (AttributeError, OSError):
+            return False
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _reclaim_abandoned_sequence_lock(lock_path):
+    """Remove a dead-owner lock only if it is unchanged since inspection."""
+    try:
+        before = os.stat(lock_path)
+        with open(lock_path, "r", encoding="ascii") as handle:
+            raw_pid = handle.read().strip()
+    except (OSError, UnicodeError):
+        return False
+
+    try:
+        owner_pid = int(raw_pid)
+    except ValueError:
+        owner_pid = 0
+
+    if owner_pid and _process_is_alive(owner_pid):
+        return False
+    if not owner_pid and time.time() - before.st_mtime < SEQUENCE_LOCK_TIMEOUT_SECONDS:
+        return False
+
+    try:
+        after = os.stat(lock_path)
+        fingerprint_before = (before.st_ino, before.st_size, before.st_mtime_ns)
+        fingerprint_after = (after.st_ino, after.st_size, after.st_mtime_ns)
+        if fingerprint_before != fingerprint_after:
+            return False
+        os.remove(lock_path)
+        return True
+    except OSError:
+        return False
+
+
+def _acquire_sequence_lock(inbox_dir):
+    lock_path = os.path.join(inbox_dir, SEQUENCE_LOCK_FILENAME)
+    deadline = time.monotonic() + SEQUENCE_LOCK_TIMEOUT_SECONDS
+    while True:
+        descriptor = None
+        try:
+            descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(descriptor, "{}\n".format(os.getpid()).encode("ascii"))
+            return descriptor, lock_path
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                # Inspect only after the normal wait expires. On Windows,
+                # repeatedly opening the live lock for inspection can prevent
+                # its owner from deleting it during release.
+                if _reclaim_abandoned_sequence_lock(lock_path):
+                    deadline = time.monotonic() + SEQUENCE_LOCK_TIMEOUT_SECONDS
+                    continue
+                print(
+                    "warning: timed out waiting for sequence lock {}".format(lock_path),
+                    file=sys.stderr,
+                )
+                return None, lock_path
+            time.sleep(SEQUENCE_LOCK_POLL_SECONDS)
+        except OSError as exc:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+                try:
+                    os.remove(lock_path)
+                except OSError:
+                    pass
+            print(
+                "warning: could not acquire sequence lock {}: {}".format(
+                    lock_path, exc
+                ),
+                file=sys.stderr,
+            )
+            return None, lock_path
+
+
+def _release_sequence_lock(descriptor, lock_path):
+    if descriptor is not None:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    try:
+        os.remove(lock_path)
+    except OSError:
+        pass
+
+
+def _persist_sequence_unlocked(inbox_dir, value):
     counter_path = os.path.join(inbox_dir, SEQUENCE_COUNTER_FILENAME)
     temp = None
     try:
@@ -129,6 +252,44 @@ def commit_sequence(inbox_dir, value):
         )
         return False
     return True
+
+
+def commit_sequence(inbox_dir, value):
+    """Persist exactly the next sequence value under an exclusive lock."""
+    descriptor, lock_path = _acquire_sequence_lock(inbox_dir)
+    if descriptor is None:
+        return False
+    try:
+        current = _read_sequence_counter(
+            os.path.join(inbox_dir, SEQUENCE_COUNTER_FILENAME)
+        )
+        if value != current + 1:
+            print(
+                "warning: sequence {} is stale; next value is {}".format(
+                    value, current + 1
+                ),
+                file=sys.stderr,
+            )
+            return False
+        return _persist_sequence_unlocked(inbox_dir, value)
+    finally:
+        _release_sequence_lock(descriptor, lock_path)
+
+
+def reserve_sequence(inbox_dir):
+    """Atomically reserve and persist the next unique sequence number."""
+    descriptor, lock_path = _acquire_sequence_lock(inbox_dir)
+    if descriptor is None:
+        return None
+    try:
+        value = _read_sequence_counter(
+            os.path.join(inbox_dir, SEQUENCE_COUNTER_FILENAME)
+        ) + 1
+        if not _persist_sequence_unlocked(inbox_dir, value):
+            return None
+        return value
+    finally:
+        _release_sequence_lock(descriptor, lock_path)
 
 
 def completion_marker_from_spec(spec):
@@ -689,6 +850,11 @@ def confirm_dispatch(inbox_dir, task_id, agent_name, created_at, dry_run=False):
         print(f"error: could not read task metadata: {task_err}", file=sys.stderr)
         return 1
     agent_name = task_data.get("agent_name", agent_name)
+    ok, status = require_usable_roster(inbox_dir, agent_name=agent_name)
+    maybe_warn_roster(status)
+    if not ok:
+        print(format_roster_block(status), file=sys.stderr)
+        return 1
 
     # Check for existing TASK_DISPATCHED event (idempotent)
     events_path = os.path.join(inbox_dir, "events.jsonl")
@@ -730,87 +896,69 @@ def confirm_dispatch(inbox_dir, task_id, agent_name, created_at, dry_run=False):
 
 
 def main():
-    # Parse arguments
-    args = sys.argv[1:]
-    dry_run = False
-    created_at = None
-    spec_path = None
-    inbox_dir = None
-    handoff_language = None
+    # Parse arguments. allow_abbrev=False preserves the previous exact
+    # long-flag matching (no prefix abbreviation); --help now works, and
+    # usage errors exit 2 (the argparse convention other afc-* scripts use).
+    #
+    # --confirm-dispatch / --confirm-dispatch-agent take task_id / agent_name
+    # values that _SAFE_NAME_RE permits to start with '-'. argparse treats a
+    # '-'-prefixed token as an option rather than a value, so pull these two
+    # options out of argv first (both "--opt value" and "--opt=value" forms,
+    # matching the previous manual parser) and hand the rest to argparse.
+    # They stay registered below for --help discoverability.
+    argv = sys.argv[1:]
     confirm_dispatch_id = None
     confirm_dispatch_agent = None
-    trace_id = None
-    coordinator_thread_id = None
-    coordinator_root_thread_id = None
-    legacy_unrouted = False
-
+    rest = []
     i = 0
-    while i < len(args):
-        if args[i] == "--dry-run":
-            dry_run = True
-        elif args[i] == "--confirm-dispatch":
-            if i + 1 >= len(args):
-                print("error: --confirm-dispatch requires a task_id", file=sys.stderr)
-                return 1
-            confirm_dispatch_id = args[i + 1]
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "--confirm-dispatch" and i + 1 < len(argv):
+            confirm_dispatch_id = argv[i + 1]
+            i += 2
+            continue
+        if tok.startswith("--confirm-dispatch="):
+            confirm_dispatch_id = tok[len("--confirm-dispatch="):]
             i += 1
-        elif args[i] == "--confirm-dispatch-agent":
-            if i + 1 >= len(args):
-                print("error: --confirm-dispatch-agent requires an agent_name", file=sys.stderr)
-                return 1
-            confirm_dispatch_agent = args[i + 1]
+            continue
+        if tok == "--confirm-dispatch-agent" and i + 1 < len(argv):
+            confirm_dispatch_agent = argv[i + 1]
+            i += 2
+            continue
+        if tok.startswith("--confirm-dispatch-agent="):
+            confirm_dispatch_agent = tok[len("--confirm-dispatch-agent="):]
             i += 1
-        elif args[i] == "--spec":
-            if i + 1 >= len(args):
-                print("error: --spec requires a file path", file=sys.stderr)
-                return 1
-            spec_path = args[i + 1]
-            i += 1
-        elif args[i] == "--inbox":
-            if i + 1 >= len(args):
-                print("error: --inbox requires a directory path", file=sys.stderr)
-                return 1
-            inbox_dir = args[i + 1]
-            i += 1
-        elif args[i] == "--created-at":
-            if i + 1 >= len(args):
-                print("error: --created-at requires a YYYY-MM-DD value", file=sys.stderr)
-                return 1
-            created_at = args[i + 1]
-            i += 1
-        elif args[i] == "--handoff-language":
-            if i + 1 >= len(args):
-                print("error: --handoff-language requires a language tag", file=sys.stderr)
-                return 1
-            handoff_language = args[i + 1]
-            i += 1
-        elif args[i] == "--trace-id":
-            if i + 1 >= len(args):
-                print("error: --trace-id requires an ID", file=sys.stderr)
-                return 1
-            trace_id = args[i + 1]
-            i += 1
-        elif args[i] == "--coordinator-thread-id":
-            if i + 1 >= len(args):
-                print("error: --coordinator-thread-id requires an ID", file=sys.stderr)
-                return 1
-            coordinator_thread_id = args[i + 1]
-            i += 1
-        elif args[i] == "--coordinator-root-thread-id":
-            if i + 1 >= len(args):
-                print("error: --coordinator-root-thread-id requires an ID", file=sys.stderr)
-                return 1
-            coordinator_root_thread_id = args[i + 1]
-            i += 1
-        elif args[i] == "--legacy-unrouted":
-            legacy_unrouted = True
-        elif args[i].startswith("--"):
-            print(f"error: unknown flag {args[i]}", file=sys.stderr)
-            return 1
-        else:
-            print(f"error: unexpected positional argument: {args[i]}", file=sys.stderr)
-            return 1
+            continue
+        rest.append(tok)
         i += 1
+
+    parser = argparse.ArgumentParser(
+        prog="afc-assign.py",
+        description="Generate a schema-valid task file from a routing spec.",
+        allow_abbrev=False,
+    )
+    parser.add_argument("--dry-run", action="store_true", help="validate without writing task files")
+    parser.add_argument("--confirm-dispatch", metavar="TASK_ID")
+    parser.add_argument("--confirm-dispatch-agent", metavar="AGENT_NAME")
+    parser.add_argument("--spec", metavar="FILE")
+    parser.add_argument("--inbox", metavar="DIR")
+    parser.add_argument("--created-at", metavar="YYYY-MM-DD")
+    parser.add_argument("--handoff-language", metavar="LANG")
+    parser.add_argument("--trace-id", metavar="ID")
+    parser.add_argument("--coordinator-thread-id", metavar="ID")
+    parser.add_argument("--coordinator-root-thread-id", metavar="ID")
+    parser.add_argument("--legacy-unrouted", action="store_true", help="generate unrouted tasks (legacy; not for new work)")
+    args = parser.parse_args(rest)
+
+    dry_run = args.dry_run
+    created_at = args.created_at
+    spec_path = args.spec
+    inbox_dir = args.inbox
+    handoff_language = args.handoff_language
+    trace_id = args.trace_id
+    coordinator_thread_id = args.coordinator_thread_id
+    coordinator_root_thread_id = args.coordinator_root_thread_id
+    legacy_unrouted = args.legacy_unrouted
 
     # Handle --confirm-dispatch mode
     if confirm_dispatch_id:
@@ -928,6 +1076,12 @@ def main():
     task_id = spec["task_id"]
     agent_name = spec["agent_name"]
 
+    ok, status = require_usable_roster(inbox_dir, agent_name=agent_name)
+    maybe_warn_roster(status)
+    if not ok:
+        print(format_roster_block(status), file=sys.stderr)
+        return 1
+
     # CLI --handoff-language overrides spec handoff.language
     if handoff_language:
         spec["handoff.language_cli"] = handoff_language
@@ -943,13 +1097,13 @@ def main():
         print(f"error: task file already exists: {task_filepath}", file=sys.stderr)
         return 1
 
-    # Auto-allocate a task sequence when the coordinator did not supply one, so
-    # every dispatched task carries a completion marker and neither side can
-    # forget it. Peek now to embed the marker; the counter is only consumed by
-    # commit_sequence just before the task file is written, so a generation
-    # error or dry-run never burns a number.
+    # Auto-allocate a task sequence when the coordinator did not supply one.
+    # First use an advisory value so every fallible content/handoff validation
+    # completes without mutating the counter. Real assignments reserve the
+    # final value immediately before writing artifacts.
     pending_sequence = None
-    if not str(spec.get("handoff.sequence") or "").strip():
+    auto_sequence = not str(spec.get("handoff.sequence") or "").strip()
+    if auto_sequence:
         pending_sequence = peek_sequence(inbox_dir)
         spec["handoff.sequence"] = str(pending_sequence)
 
@@ -984,9 +1138,23 @@ def main():
         print(handoff)
         return 0
 
-    # Consume the auto-allocated sequence now that the dispatch is committing.
-    if pending_sequence is not None:
-        commit_sequence(inbox_dir, pending_sequence)
+    if auto_sequence:
+        pending_sequence = reserve_sequence(inbox_dir)
+        if pending_sequence is None:
+            print("error: could not reserve a unique handoff sequence", file=sys.stderr)
+            return 1
+        spec["handoff.sequence"] = str(pending_sequence)
+        marker = completion_marker_from_spec(spec)
+        if marker:
+            spec["completion_marker"] = marker
+        content = generate_task_content(spec)
+        handoff, handoff_err = generate_handoff(spec, task_filepath, inbox_dir)
+        if handoff_err:
+            print(f"error: {handoff_err}", file=sys.stderr)
+            return 1
+        if len(content.encode("utf-8")) > TASK_BUDGET_BYTES:
+            print("error: generated task exceeds hard budget after sequence reservation", file=sys.stderr)
+            return 1
 
     # Write task file (force LF line endings on all platforms)
     try:

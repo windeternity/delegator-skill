@@ -98,6 +98,50 @@ def make_terminal_inbox(include_report=True):
     return tmpdir
 
 
+def write_usable_roster(inbox, default_cal="CAL-2", agents=None):
+    """Write a minimal usable roster so the dispatch gate passes (CAL-2 arm).
+
+    The static report fixtures under pass/ have no AGENT_ROSTER.md, so any
+    cal2-arm test that expects a successful arm must seed a usable roster first.
+    Defaults cover every agent_name referenced by those fixtures (Worker1,
+    WorkerT1, WorkerT2) plus RelayWorker; tests that need a roster WITHOUT a
+    specific agent pass an explicit ``agents`` list.
+    """
+    if agents is None:
+        agents = ["Worker1", "WorkerT1", "WorkerT2", "RelayWorker"]
+    rows = "\n".join(
+        "| {a} | implementer | external-chat | user-relay-model | user-relay:{a} | task-only | no | yes | tests_only | yes | no | manual_needed | fixture work | none | external user-relay worker |".format(a=a)
+        for a in agents
+    )
+    roster = """---
+schema: agent-file-coordination/roster
+schema_version: 0.1.0
+---
+
+# Agent Roster
+
+<!-- SESSION PREFERENCES
+Default CAL: {default_cal}
+Execution preference: fixture external workers
+Available resources: external user-relay workers
+Available now: {agents}
+Model preference order: fixture model
+Avoid / unavailable: none
+Smoke tests: fixture
+Confirmed: 2026-06-30
+Change policy: keep these defaults until the user asks to change them or a route becomes unavailable.
+-->
+
+| Agent Name | Role | Tool | Model | Provider / Access Path | Protocol Mode | Coordinator Authority | Can Edit | Can Run Commands | Can Write Reports | Browser / Visual | Worktree Capability | Best Use | Avoid | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Coordinator | coordinator | codex | coordinator-model | local coordinator | full-skill | yes | yes | bounded | yes | yes | can_use_existing | task decomposition, evidence review, final verdict | routine worker loops | fixture coordinator |
+{rows}
+""".format(default_cal=default_cal, agents=", ".join(agents), rows=rows)
+    with open(os.path.join(inbox, "AGENT_ROSTER.md"), "w",
+              encoding="utf-8", newline="\n") as f:
+        f.write(roster)
+
+
 def test_help():
     """--help exits 0."""
     ok, stdout, stderr = run(
@@ -357,6 +401,7 @@ def test_cal2_arm_dry_run_no_write():
     tmpdir = tempfile.mkdtemp(prefix="afc-cal2-arm-test-")
     try:
         shutil.copytree(src, tmpdir, dirs_exist_ok=True)
+        write_usable_roster(tmpdir)
         events_path = os.path.join(tmpdir, "events.jsonl")
         ok, stdout, stderr = run_cal2_arm(
             [
@@ -395,6 +440,7 @@ def test_cal2_arm_records_dispatch_then_watches():
     tmpdir = tempfile.mkdtemp(prefix="afc-cal2-arm-test-")
     try:
         shutil.copytree(src, tmpdir, dirs_exist_ok=True)
+        write_usable_roster(tmpdir)
         events_path = os.path.join(tmpdir, "events.jsonl")
         ok, stdout, stderr = run_cal2_arm(
             [
@@ -445,6 +491,7 @@ def test_cal2_arm_batch_filters_task_ids():
     tmpdir = tempfile.mkdtemp(prefix="afc-cal2-arm-test-")
     try:
         shutil.copytree(src, tmpdir, dirs_exist_ok=True)
+        write_usable_roster(tmpdir)
         ok, stdout, stderr = run_cal2_arm(
             [
                 "--task-id", "task-A",
@@ -482,6 +529,7 @@ def test_cal2_arm_batch_incremental_opts_out():
     tmpdir = tempfile.mkdtemp(prefix="afc-cal2-arm-test-")
     try:
         shutil.copytree(src, tmpdir, dirs_exist_ok=True)
+        write_usable_roster(tmpdir)
         ok, stdout, stderr = run_cal2_arm(
             [
                 "--task-id", "task-A",
@@ -512,6 +560,7 @@ def test_cal2_arm_expected_reports_out_of_range():
     tmpdir = tempfile.mkdtemp(prefix="afc-cal2-arm-test-")
     try:
         shutil.copytree(src, tmpdir, dirs_exist_ok=True)
+        write_usable_roster(tmpdir)
         ok, stdout, stderr = run_cal2_arm(
             [
                 "--task-id", "task-A",
@@ -535,6 +584,7 @@ def test_cal2_arm_batch_auto_archive_forces_incremental():
     tmpdir = tempfile.mkdtemp(prefix="afc-cal2-arm-test-")
     try:
         shutil.copytree(src, tmpdir, dirs_exist_ok=True)
+        write_usable_roster(tmpdir)
         ok, stdout, stderr = run_cal2_arm(
             [
                 "--task-id", "task-A",
@@ -556,6 +606,122 @@ def test_cal2_arm_batch_auto_archive_forces_incremental():
             ok = False
         if "--expected-task-id task-A" not in stdout or "--expected-task-id task-B" not in stdout:
             print("    FAIL: batch arm should still scope to current task IDs")
+            ok = False
+        return ok
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_cal2_arm_blocks_missing_roster():
+    """CAL-2 arm fails closed on a missing roster (O3b) before any side effect."""
+    src = os.path.join(PASS_DIR, "valid-report")
+    tmpdir = tempfile.mkdtemp(prefix="afc-cal2-arm-test-")
+    try:
+        shutil.copytree(src, tmpdir, dirs_exist_ok=True)
+        # Intentionally NO write_usable_roster(tmpdir): roster is missing.
+        ok, stdout, stderr = run_cal2_arm(
+            [
+                "--task-id", "task-watch-test",
+                "--inbox", tmpdir,
+                "--dry-run",
+                "--max-iterations", "1",
+                "--poll-interval", "0",
+            ],
+            expect_exit=1,
+            label="cal2-arm-blocks-missing-roster",
+        )
+        if "ROSTER_BLOCKED" not in stderr:
+            print("    FAIL: expected ROSTER_BLOCKED, got: {}".format(stderr[:300]))
+            ok = False
+        if "roster_status:" not in stderr:
+            print("    FAIL: expected roster_status line, got: {}".format(stderr[:300]))
+            ok = False
+        # No dispatch event should have been written.
+        if os.path.isfile(os.path.join(tmpdir, "events.jsonl")):
+            print("    FAIL: dispatch event written despite missing roster")
+            ok = False
+        return ok
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_cal2_arm_blocks_unrostered_agent():
+    """CAL-2 arm fails closed when a task's agent_name is not a rostered route.
+
+    The roster is usable (Worker1 etc.) but the task's agent_name is rewritten to
+    GhostWorker, which is not rostered. The per-task gate must block before any
+    dispatch event or watcher side effect.
+    """
+    src = os.path.join(PASS_DIR, "valid-report")
+    tmpdir = tempfile.mkdtemp(prefix="afc-cal2-arm-test-")
+    try:
+        shutil.copytree(src, tmpdir, dirs_exist_ok=True)
+        write_usable_roster(tmpdir)  # Worker1/WorkerT1/WorkerT2/RelayWorker only
+        task_path = os.path.join(tmpdir, "task-watch-test.md")
+        with open(task_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        with open(task_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content.replace("agent_name: Worker1",
+                                    "agent_name: GhostWorker", 1))
+        ok, stdout, stderr = run_cal2_arm(
+            [
+                "--task-id", "task-watch-test",
+                "--inbox", tmpdir,
+                "--dry-run",
+                "--max-iterations", "1",
+                "--poll-interval", "0",
+            ],
+            expect_exit=1,
+            label="cal2-arm-blocks-unrostered-agent",
+        )
+        if "ROSTER_BLOCKED" not in stderr:
+            print("    FAIL: expected ROSTER_BLOCKED, got: {}".format(stderr[:300]))
+            ok = False
+        if "GhostWorker" not in stderr:
+            print("    FAIL: expected the unrostered agent named, got: {}".format(stderr[:300]))
+            ok = False
+        if os.path.isfile(os.path.join(tmpdir, "events.jsonl")):
+            print("    FAIL: dispatch event written despite unrostered agent")
+            ok = False
+        return ok
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_cal2_arm_blocks_blank_agent_name():
+    """A task with a blank/missing agent_name is rejected before arming.
+
+    Guards the Codex P2 finding: roster_status() only applies its per-agent
+    filter for truthy agent_name, so an empty agent_name must be rejected
+    explicitly rather than degrading the gate to "any usable route".
+    """
+    src = os.path.join(PASS_DIR, "valid-report")
+    tmpdir = tempfile.mkdtemp(prefix="afc-cal2-arm-test-")
+    try:
+        shutil.copytree(src, tmpdir, dirs_exist_ok=True)
+        write_usable_roster(tmpdir)
+        task_path = os.path.join(tmpdir, "task-watch-test.md")
+        with open(task_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        with open(task_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content.replace("agent_name: Worker1",
+                                    "agent_name: ''", 1))
+        ok, stdout, stderr = run_cal2_arm(
+            [
+                "--task-id", "task-watch-test",
+                "--inbox", tmpdir,
+                "--dry-run",
+                "--max-iterations", "1",
+                "--poll-interval", "0",
+            ],
+            expect_exit=1,
+            label="cal2-arm-blocks-blank-agent-name",
+        )
+        if "ROSTER_BLOCKED" not in stderr or "no agent_name" not in stderr:
+            print("    FAIL: expected ROSTER_BLOCKED + no agent_name, got: {}".format(stderr[:300]))
+            ok = False
+        if os.path.isfile(os.path.join(tmpdir, "events.jsonl")):
+            print("    FAIL: dispatch event written despite blank agent_name")
             ok = False
         return ok
     finally:
@@ -2869,6 +3035,9 @@ def main():
         test_cal2_arm_batch_incremental_opts_out,
         test_cal2_arm_expected_reports_out_of_range,
         test_cal2_arm_batch_auto_archive_forces_incremental,
+        test_cal2_arm_blocks_missing_roster,
+        test_cal2_arm_blocks_unrostered_agent,
+        test_cal2_arm_blocks_blank_agent_name,
         test_expected_reports_batch_stale_alarm,
         test_expected_reports_batch_fresh_not_stale,
         test_expected_reports_batch_appends_receipts,

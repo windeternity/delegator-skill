@@ -30,6 +30,7 @@ except Exception:
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 SCRIPT = os.path.join(REPO_ROOT, "scripts", "afc-first-run-config.py")
+ROUTE = os.path.join(REPO_ROOT, "scripts", "afc-route.py")
 TEMPLATE = os.path.join(REPO_ROOT, "templates", "TEMPLATE_ROSTER.md")
 
 
@@ -68,25 +69,36 @@ class Runner:
         return 0 if self.failed == 0 else 1
 
 
-def run_script(*extra_args, timeout=30):
-    """Run afc-first-run-config.py. Returns (exit_code, stdout, stderr)."""
+def run_script(*extra_args, skill=None, timeout=30):
+    """Run afc-first-run-config.py. If skill is given, set AFC_SKILL_ROOT to it
+    (so writes/reads target the install-local LOCAL_ROSTER.md in that temp)."""
     cmd = [sys.executable, "-B", SCRIPT] + list(extra_args)
-    r = subprocess.run(cmd, capture_output=True, timeout=timeout,
+    env = dict(os.environ)
+    if skill is not None:
+        env["AFC_SKILL_ROOT"] = skill
+    else:
+        env.pop("AFC_SKILL_ROOT", None)
+    r = subprocess.run(cmd, capture_output=True, timeout=timeout, env=env,
+                       encoding="utf-8", errors="replace")
+    return r.returncode, r.stdout, r.stderr
+
+
+def run_route(*extra_args, cwd=None, timeout=30):
+    cmd = [sys.executable, "-B", ROUTE] + list(extra_args)
+    r = subprocess.run(cmd, cwd=cwd, capture_output=True, timeout=timeout,
                        encoding="utf-8", errors="replace")
     return r.returncode, r.stdout, r.stderr
 
 
 def make_fresh_inbox():
-    """Create a temp project with .agent-inbox/ populated from template."""
+    """Create a temp project with .agent-inbox/ but NO AGENT_ROSTER.md.
+
+    Roster resolution now defaults to the install-local LOCAL_ROSTER.md
+    (selected via --skill-root). Tests that need a legacy project roster
+    write it explicitly via write_user_relay_roster()."""
     tmp = tempfile.mkdtemp(prefix="afc-first-run-")
     inbox = os.path.join(tmp, ".agent-inbox")
     os.makedirs(inbox)
-    # Copy template roster
-    with open(TEMPLATE, "r", encoding="utf-8") as f:
-        roster = f.read()
-    with open(os.path.join(inbox, "AGENT_ROSTER.md"), "w",
-              encoding="utf-8", newline="\n") as f:
-        f.write(roster)
     # Create empty events.jsonl
     with open(os.path.join(inbox, "events.jsonl"), "w",
               encoding="utf-8", newline="\n") as f:
@@ -99,19 +111,84 @@ def cleanup(tmp):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def make_skill():
+    """Create a temp skill root for the install-local LOCAL_ROSTER.md."""
+    return tempfile.mkdtemp(prefix="afc-skill-root-")
+
+
+def write_user_relay_roster(inbox, default_cal="CAL-3"):
+    with open(os.path.join(inbox, "AGENT_ROSTER.md"), "w",
+              encoding="utf-8", newline="\n") as f:
+        f.write("""---
+schema: agent-file-coordination/roster
+schema_version: 0.1.0
+---
+# Agent Roster
+
+<!-- SESSION PREFERENCES
+Default CAL: {default_cal}
+Execution preference: fixture user relay
+Available resources: external user-relay worker
+Available now: RelayWorker
+Model preference order: fixture model
+Avoid / unavailable: none
+Smoke tests: fixture
+Confirmed: 2026-06-29
+Change policy: keep these defaults until the user asks to change them or a route becomes unavailable.
+-->
+
+| Agent Name | Role | Tool | Model | Provider / Access Path | Protocol Mode | Coordinator Authority | Can Edit | Can Run Commands | Can Write Reports | Browser / Visual | Worktree Capability | Best Use | Avoid | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Coordinator | coordinator | codex | coordinator-model | local coordinator | full-skill | yes | yes | bounded | yes | yes | can_use_existing | task decomposition, evidence review, final verdict | routine worker loops | fixture coordinator |
+| RelayWorker | implementer | external-chat | user-relay-model | user-relay:RelayWorker | task-only | no | yes | tests_only | yes | no | manual_needed | fixture work | none | external user-relay worker |
+""".format(default_cal=default_cal))
+
+
 # --- Test cases ---------------------------------------------------------
 
 def test_check_only_unconfigured(runner):
     """Fresh template: --check-only returns NOT_CONFIGURED (exit 1)."""
     print("\n[test] check-only on fresh template -> NOT_CONFIGURED")
     tmp, inbox = make_fresh_inbox()
+    skill = make_skill()
     try:
-        code, out, err = run_script("--inbox", inbox, "--check-only")
+        code, out, err = run_script("--inbox", inbox, "--skill-root", skill, "--check-only")
         runner.check("check-only exit=1 (unconfigured)", code == 1,
                      "exit={} stdout={!r} stderr={!r}".format(code, out[:200], err[:200]))
         runner.check("check-only prints NOT_CONFIGURED",
                      "NOT_CONFIGURED" in out,
                      "stdout={!r}".format(out[:200]))
+        runner.check("check-only returns ASK_CAL before routing",
+                     "next_action: ASK_CAL" in out,
+                     "stdout={!r}".format(out[:300]))
+    finally:
+        cleanup(tmp)
+        cleanup(skill)
+
+
+def test_direct_route_missing_roster_stays_light(runner):
+    """DIRECT routing must not require a roster or create coordination files."""
+    print("\n[test] DIRECT route stays light with missing roster")
+    tmp = tempfile.mkdtemp(prefix="afc-route-direct-")
+    try:
+        code, out, err = run_route(
+            "--estimated-direct-minutes", "5",
+            "--independent-workstreams", "1",
+            "--smallest-workstream-minutes", "5",
+            "--specialized-capability", "no",
+            "--high-risk-independent-review", "no",
+            "--external-worker-required", "no",
+            "--semantic-change", "no",
+            "--expected-rounds", "1",
+            "--context-bytes", "100",
+            cwd=tmp,
+        )
+        runner.check("route exit=0", code == 0,
+                     "exit={} stdout={!r} stderr={!r}".format(code, out[:200], err[:200]))
+        runner.check("route decision DIRECT", "DIRECT" in out,
+                     "stdout={!r}".format(out[:300]))
+        runner.check("no inbox created", not os.path.exists(os.path.join(tmp, ".agent-inbox")),
+                     "entries={}".format(os.listdir(tmp)))
     finally:
         cleanup(tmp)
 
@@ -128,15 +205,22 @@ def test_print_questionnaire(runner):
                  "CAL preference" in out, "stdout={!r}".format(out[:200]))
     runner.check("questionnaire has Model preference order",
                  "Model preference order" in out, "stdout={!r}".format(out[:200]))
+    runner.check("questionnaire names cross-project shared default",
+                 "shared across projects" in out,
+                 "stdout={!r}".format(out[:400]))
+    runner.check("questionnaire avoids misleading project-local wording",
+                 "this project's default" not in out.lower(),
+                 "stdout={!r}".format(out[:400]))
 
 
 def test_write_cal2(runner):
-    """Write CAL-2 and preferences, then verify roster and event."""
-    print("\n[test] write CAL-2 and preferences")
+    """Write CAL-2 to the install-local LOCAL_ROSTER.md and verify it."""
+    print("\n[test] write CAL-2 to LOCAL_ROSTER.md")
     tmp, inbox = make_fresh_inbox()
+    skill = make_skill()
     try:
         code, out, err = run_script(
-            "--inbox", inbox,
+            "--inbox", inbox, "--skill-root", skill,
             "--default-cal", "CAL-2",
             "--resources", "Claude Code CLI, codex CLI",
             "--available-now", "worker-cli, backup-cli",
@@ -147,102 +231,100 @@ def test_write_cal2(runner):
         )
         runner.check("write exit=0", code == 0,
                      "exit={} stdout={!r} stderr={!r}".format(code, out[:300], err[:200]))
-        runner.check("write prints OK", "OK" in out,
-                     "stdout={!r}".format(out[:200]))
-
-        # Verify roster content
-        roster_path = os.path.join(inbox, "AGENT_ROSTER.md")
+        runner.check("write prints OK", "OK" in out, "stdout={!r}".format(out[:200]))
+        roster_path = os.path.join(skill, "LOCAL_ROSTER.md")
+        runner.check("LOCAL_ROSTER.md created", os.path.isfile(roster_path),
+                     "skill dir={}".format(os.listdir(skill)))
         with open(roster_path, "r", encoding="utf-8") as f:
             roster = f.read()
-        runner.check("roster has Default CAL: CAL-2",
-                     "Default CAL: CAL-2" in roster,
-                     roster[:500])
-        runner.check("roster has resources",
-                     "Claude Code CLI, codex CLI" in roster,
-                     roster[:500])
-        runner.check("roster has available now",
-                     "worker-cli, backup-cli" in roster,
-                     roster[:500])
-        runner.check("roster has model order",
-                     "primary-model, review-model" in roster,
-                     roster[:500])
-        runner.check("roster has avoid",
-                     "deprecated-model (unavailable)" in roster,
-                     roster[:500])
-        runner.check("roster has capability limits",
-                     "no browser automation" in roster,
-                     roster[:500])
-        runner.check("roster has confirmed date",
-                     "Confirmed: 2026-06-27" in roster,
-                     roster[:500])
-
-        # Verify event
-        events_path = os.path.join(inbox, "events.jsonl")
-        with open(events_path, "r", encoding="utf-8") as f:
+        runner.check("Default CAL: CAL-2", "Default CAL: CAL-2" in roster, roster[:500])
+        runner.check("resources recorded", "Claude Code CLI, codex CLI" in roster, roster[:500])
+        runner.check("available now recorded", "worker-cli, backup-cli" in roster, roster[:500])
+        runner.check("model order recorded", "primary-model, review-model" in roster, roster[:500])
+        runner.check("avoid recorded", "deprecated-model (unavailable)" in roster, roster[:500])
+        runner.check("capability limits recorded", "no browser automation" in roster, roster[:500])
+        runner.check("confirmed date", "Confirmed: 2026-06-27" in roster, roster[:500])
+        # Global roster update must not write a project events.jsonl entry.
+        with open(os.path.join(inbox, "events.jsonl"), "r", encoding="utf-8") as f:
             events_text = f.read()
-        runner.check("events.jsonl has ROSTER_UPDATED",
-                     "ROSTER_UPDATED" in events_text,
-                     events_text[:300])
-        runner.check("events.jsonl has CAL= in summary",
-                     "CAL=CAL-2" in events_text or "CAL=CAL-2" in events_text.replace(" ", ""),
-                     events_text[:300])
+        runner.check("no ROSTER_UPDATED event for global write",
+                     "ROSTER_UPDATED" not in events_text, events_text[:200])
     finally:
         cleanup(tmp)
+        cleanup(skill)
 
 
 def test_check_only_configured(runner):
-    """After writing, --check-only returns CONFIGURED (exit 0)."""
+    """After writing LOCAL_ROSTER.md, --check-only returns CONFIGURED."""
     print("\n[test] check-only after write -> CONFIGURED")
     tmp, inbox = make_fresh_inbox()
+    skill = make_skill()
     try:
-        # Write first
-        run_script("--inbox", inbox, "--default-cal", "CAL-2",
-                    "--confirmed-at", "2026-06-27")
-        # Check
-        code, out, err = run_script("--inbox", inbox, "--check-only")
+        run_script("--inbox", inbox, "--skill-root", skill,
+                   "--default-cal", "CAL-2", "--confirmed-at", "2026-06-27")
+        code, out, err = run_script("--inbox", inbox, "--skill-root", skill, "--check-only")
         runner.check("check-only exit=0 (configured)", code == 0,
                      "exit={} stdout={!r}".format(code, out[:200]))
-        runner.check("check-only prints CONFIGURED",
-                     "CONFIGURED" in out,
+        runner.check("check-only prints CONFIGURED", "CONFIGURED" in out,
                      "stdout={!r}".format(out[:200]))
-        runner.check("check-only shows CAL-2",
-                     "CAL-2" in out,
+        runner.check("check-only shows CAL-2", "CAL-2" in out,
+                     "stdout={!r}".format(out[:200]))
+        runner.check("check-only source install-local", "install-local" in out,
                      "stdout={!r}".format(out[:200]))
     finally:
         cleanup(tmp)
+        cleanup(skill)
 
 
-def test_events_append(runner):
-    """Second write appends a second event (does not overwrite)."""
-    print("\n[test] events.jsonl append (not overwrite)")
+def test_roster_status_requested_mode(runner):
+    """Default CAL-3 must not block explicit user-relay roster status checks."""
+    print("\n[test] roster-status respects requested dispatch mode")
     tmp, inbox = make_fresh_inbox()
+    skill = make_skill()
     try:
-        run_script("--inbox", inbox, "--default-cal", "CAL-1",
-                    "--confirmed-at", "2026-06-27")
-        run_script("--inbox", inbox, "--default-cal", "CAL-2",
-                    "--confirmed-at", "2026-06-28")
-        events_path = os.path.join(inbox, "events.jsonl")
-        with open(events_path, "r", encoding="utf-8") as f:
-            lines = [l.strip() for l in f if l.strip()]
-        runner.check("events.jsonl has 2 lines", len(lines) == 2,
-                     "lines={}".format(len(lines)))
-        ids = set()
-        for line in lines:
-            evt = json.loads(line)
-            ids.add(evt.get("event_id"))
-        runner.check("event IDs are distinct", len(ids) == 2,
-                     "ids={}".format(ids))
+        write_user_relay_roster(inbox, default_cal="CAL-3")
+        code, out, err = run_script(
+            "--inbox", inbox, "--skill-root", skill, "--roster-status", "--dispatch-mode", "lite"
+        )
+        runner.check("lite roster-status exit=0", code == 0,
+                     "exit={} stdout={!r} stderr={!r}".format(code, out[:300], err[:200]))
+        runner.check("lite roster-status usable", "roster_status: usable" in out,
+                     "stdout={!r}".format(out[:300]))
+        code, out, err = run_script(
+            "--inbox", inbox, "--skill-root", skill, "--roster-status", "--dispatch-mode", "cal-3"
+        )
+        runner.check("cal-3 roster-status exit=1 without probe", code == 1,
+                     "exit={} stdout={!r} stderr={!r}".format(code, out[:300], err[:200]))
+        runner.check("cal-3 roster-status requires probe", "CAL-3 requires" in out,
+                     "stdout={!r}".format(out[:300]))
     finally:
         cleanup(tmp)
+        cleanup(skill)
+
+
+def test_roster_status_no_local_roster(runner):
+    """No install-local LOCAL_ROSTER.md and no usable project roster => missing."""
+    print("\n[test] no LOCAL + no usable project roster => missing")
+    tmp, inbox = make_fresh_inbox()
+    skill = make_skill()
+    try:
+        code, out, err = run_script("--inbox", inbox, "--skill-root", skill, "--roster-status")
+        runner.check("exit=1", code == 1, "exit={} out={!r}".format(code, out[:300]))
+        runner.check("status missing", "roster_status: missing" in out, out[:300])
+        runner.check("configure_local_roster", "configure_local_roster" in out, out[:300])
+    finally:
+        cleanup(tmp)
+        cleanup(skill)
 
 
 def test_invalid_cal_rejected(runner):
     """Invalid CAL value is rejected with exit 1."""
     print("\n[test] invalid CAL rejected")
     tmp, inbox = make_fresh_inbox()
+    skill = make_skill()
     try:
         code, out, err = run_script(
-            "--inbox", inbox, "--default-cal", "CAL-99",
+            "--inbox", inbox, "--skill-root", skill, "--default-cal", "CAL-99",
             "--confirmed-at", "2026-06-27",
         )
         # argparse rejects invalid choice before main runs
@@ -250,15 +332,17 @@ def test_invalid_cal_rejected(runner):
                      "exit={} stdout={!r} stderr={!r}".format(code, out[:200], err[:200]))
     finally:
         cleanup(tmp)
+        cleanup(skill)
 
 
 def test_secret_rejected(runner):
     """Secret-looking input is rejected with exit 1."""
     print("\n[test] secret input rejected")
     tmp, inbox = make_fresh_inbox()
+    skill = make_skill()
     try:
         code, out, err = run_script(
-            "--inbox", inbox, "--default-cal", "CAL-2",
+            "--inbox", inbox, "--skill-root", skill, "--default-cal", "CAL-2",
             "--resources", "api_key=FAKE_SECRET_TOKEN_FOR_TEST_12345",
             "--confirmed-at", "2026-06-27",
         )
@@ -269,37 +353,7 @@ def test_secret_rejected(runner):
                      "stderr={!r}".format(err[:300]))
     finally:
         cleanup(tmp)
-
-
-def test_preserve_existing_table(runner):
-    """Existing roster table rows are preserved after write."""
-    print("\n[test] existing roster table preserved")
-    tmp, inbox = make_fresh_inbox()
-    try:
-        # Add a custom row to the roster before writing config
-        roster_path = os.path.join(inbox, "AGENT_ROSTER.md")
-        with open(roster_path, "r", encoding="utf-8") as f:
-            roster = f.read()
-        custom_row = ("| MyCustomAgent | implementer | custom | GPT-4o "
-                      "| local | task-only | no | yes | yes | unknown "
-                      "| unknown | custom work | n/a | added by test |")
-        roster = roster + "\n" + custom_row + "\n"
-        with open(roster_path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(roster)
-        # Write config
-        run_script("--inbox", inbox, "--default-cal", "CAL-1",
-                    "--confirmed-at", "2026-06-27")
-        # Verify custom row still present
-        with open(roster_path, "r", encoding="utf-8") as f:
-            after = f.read()
-        runner.check("custom row preserved",
-                     "MyCustomAgent" in after,
-                     after[:800])
-        runner.check("CAL written",
-                     "Default CAL: CAL-1" in after,
-                     after[:800])
-    finally:
-        cleanup(tmp)
+        cleanup(skill)
 
 
 def test_recommend_cal1(runner):
@@ -328,47 +382,17 @@ def test_invalid_date_rejected(runner):
     """Invalid confirmed-at date is rejected."""
     print("\n[test] invalid date rejected")
     tmp, inbox = make_fresh_inbox()
+    skill = make_skill()
     try:
         code, out, err = run_script(
-            "--inbox", inbox, "--default-cal", "CAL-2",
+            "--inbox", inbox, "--skill-root", skill, "--default-cal", "CAL-2",
             "--confirmed-at", "not-a-date",
         )
         runner.check("invalid date exit=1", code == 1,
                      "exit={} stderr={!r}".format(code, err[:200]))
     finally:
         cleanup(tmp)
-
-
-def test_non_dict_events_no_crash(runner):
-    """P1 regression: non-dict JSON lines in events.jsonl must not crash."""
-    print("\n[test] non-dict JSON in events.jsonl (P1 regression)")
-    tmp, inbox = make_fresh_inbox()
-    try:
-        # Seed events.jsonl with a non-dict JSON line
-        events_path = os.path.join(inbox, "events.jsonl")
-        with open(events_path, "w", encoding="utf-8", newline="\n") as f:
-            f.write("[]\n")
-        code, out, err = run_script(
-            "--inbox", inbox, "--default-cal", "CAL-1",
-            "--confirmed-at", "2026-06-27",
-        )
-        runner.check("write with [] in events.jsonl exit=0", code == 0,
-                     "exit={} stdout={!r} stderr={!r}".format(code, out[:200], err[:200]))
-        # Verify event was appended (not replacing the [])
-        with open(events_path, "r", encoding="utf-8") as f:
-            lines = [l.strip() for l in f if l.strip()]
-        runner.check("events.jsonl has 2 lines (skip [] + new event)",
-                     len(lines) == 2,
-                     "lines={}".format(len(lines)))
-        evt = json.loads(lines[1])
-        runner.check("appended event is ROSTER_UPDATED",
-                     evt.get("event_type") == "ROSTER_UPDATED",
-                     "evt={}".format(evt))
-        runner.check("appended event_id is evt-001 (skipped non-dict)",
-                     evt.get("event_id") == "evt-001",
-                     "evt_id={}".format(evt.get("event_id")))
-    finally:
-        cleanup(tmp)
+        cleanup(skill)
 
 
 def test_recommend_cal2_auto_intake(runner):
@@ -416,20 +440,20 @@ def main():
     print("Running afc-first-run-config tests...")
 
     test_check_only_unconfigured(runner)
+    test_direct_route_missing_roster_stays_light(runner)
     test_print_questionnaire(runner)
     test_write_cal2(runner)
     test_check_only_configured(runner)
-    test_events_append(runner)
+    test_roster_status_requested_mode(runner)
+    test_roster_status_no_local_roster(runner)
     test_invalid_cal_rejected(runner)
     test_secret_rejected(runner)
-    test_preserve_existing_table(runner)
     test_recommend_cal1(runner)
     test_recommend_cal3(runner)
     test_recommend_cal2_auto_intake(runner)
     test_recommend_substring_trap(runner)
     test_recommend_cal3_priority(runner)
     test_invalid_date_rejected(runner)
-    test_non_dict_events_no_crash(runner)
 
     return runner.report()
 

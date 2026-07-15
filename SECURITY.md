@@ -2,6 +2,24 @@
 
 This document describes security risks related to Delegator and how to report vulnerabilities.
 
+## Security Boundaries
+
+Delegator is a coordination protocol, not a sandbox. It helps with specific safety
+gates but does not guarantee protection against all threats.
+
+| Delegator helps with | Delegator does not guarantee |
+|---|---|
+| Task/report permission boundaries | OS-level sandboxing or process isolation |
+| Worker report distrust and evidence grading | Worker honesty or model alignment |
+| Common secret/path publication checks | All semantic data leak prevention |
+| Validation command guardrails and timeout protection | Arbitrary shell safety proof |
+| CAL-3 CLI binding verification and explicit dispatch | Provider, tool, or runtime correctness |
+| Public export hygiene and forbidden directory scanning | Perfect full-history or side-channel secrecy |
+
+These boundaries define what the protocol is designed to protect against. If
+a risk falls outside these boundaries, you must add additional safeguards or
+choose not to use Delegator for that task.
+
 ## Scope
 
 This project is a **coordination protocol**, not an agent runtime. It does not execute code, manage credentials, or perform network operations. However, the protocol itself can be misused or attacked if coordinators and agents do not follow its guardrails.

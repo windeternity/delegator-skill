@@ -2,28 +2,19 @@
 schema: agent-file-coordination/roster
 schema_version: 0.1.0
 ---
-<!-- OPTIONAL project override. The default roster source of truth is the
-install-local LOCAL_ROSTER.md in the Skill directory. This project file is
-scaffolded by afc-init as a legacy/starter roster; without an explicit override
-marker it is read only when LOCAL_ROSTER.md is absent (legacy fallback).
+<!-- LOCAL-ONLY: never commit this file. It is the user-level roster source of
+truth, read directly by external-dispatch gates. Configure workers once here
+and every project reuses them; sync-skill.ps1 preserves LOCAL_* across updates. -->
 
-To promote this file to a real project override that beats the install-local
-roster, add a dedicated single-line HTML comment at the top of this file
-(before the first heading) with exactly this content — colon and hyphen
-included: `<!-- AFC_ROSTER_SCOPE: project-override -->`. The resolver only
-activates override when that dedicated single-line marker is present;
-documentation examples inside multi-line comment blocks (like this one) do
-not count.
+# Local Agent Roster
 
-Prefer configuring LOCAL_ROSTER.md once and deleting this file. -->
-
-# Agent Roster
-
-<!-- HYDRATION: Replace all <PLACEHOLDER> values with your project-local data.
-User-specific worker/model/CLI aliases belong here, not in public defaults.
-Placeholder-only rosters are invalid for LITE/FULL/CAL dispatch.
-Current-session subagents, built-in helpers, internal multi_agent calls, and
-chat-only calls inside the coordinator runtime are not AFC workers. -->
+<!-- HYDRATION: Replace all <PLACEHOLDER> values with your real worker/model/CLI
+aliases. This file lives in the installed Skill directory (e.g.
+~/.claude/skills/agent-file-coordination/LOCAL_ROSTER.md) and is shared across
+projects. Placeholder-only rosters block external dispatch. Current-session
+subagents, built-in helpers, internal multi_agent calls, and chat-only calls
+inside the coordinator runtime are not AFC workers. A project may override this
+only with an explicit project-override marker in .agent-inbox/AGENT_ROSTER.md. -->
 
 <!-- SESSION PREFERENCES
 Default CAL: <CAL-1_OR_CAL-2_OR_CAL-3>
@@ -43,7 +34,11 @@ Change policy: keep these defaults until the user asks to change them or a route
 | <WORKER_NAME_1> | <ROLE> | <TOOL_NAME> | <MODEL_NAME> | <PROVIDER_OR_PATH> | <PROTOCOL_MODE> | no | <YES_OR_NO> | <COMMAND_LEVEL> | <YES_OR_NO> | <YES_OR_NO> | <WORKTREE_CAPABILITY> | <BEST_USE> | <AVOID> | <NOTES> |
 | <WORKER_NAME_2> | <ROLE> | <TOOL_NAME> | <MODEL_NAME> | <PROVIDER_OR_PATH> | <PROTOCOL_MODE> | no | <YES_OR_NO> | <COMMAND_LEVEL> | <YES_OR_NO> | <YES_OR_NO> | <WORKTREE_CAPABILITY> | <BEST_USE> | <AVOID> | <NOTES> |
 
-<!-- Suggested values:
+<!-- CAL-3 workers also need a callable, probe-verified binding. By default that
+lives in LOCAL_INVOKE_RECIPES.json next to this file (also preserved by
+sync-skill). Never put API keys/tokens here — reference env var names instead.
+
+Suggested values:
   Role: coordinator / planner / implementer / reviewer / smoke / docs / research / other
   Protocol Mode: full-skill / worker-brief / task-only / manual-paste / unknown
   Coordinator Authority: yes / no / limited
@@ -55,9 +50,7 @@ Change policy: keep these defaults until the user asks to change them or a route
   - At least one non-coordinator external worker row must be fully hydrated.
   - CAL-1/CAL-2 workers may be user-relayed external chats/tools/sessions.
   - CAL-3 workers need callable invoke recipes and successful probe evidence.
-  - `invoke-recipes.json` is NOT a substitute for this roster; a recipe file
-    alone (no hydrated `AGENT_ROSTER.md`) is reported as `incomplete` and
-    blocks dispatch.
+  - LOCAL_INVOKE_RECIPES.json is NOT a substitute for this roster.
   - Completion still requires the expected report/evidence path; chat "done"
     alone is not accepted.
 -->

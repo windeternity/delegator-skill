@@ -8,6 +8,8 @@ review_inputs/
 .env
 .learnings/
 LOCAL_AGENT_ROSTER.md
+LOCAL_ROSTER.md
+LOCAL_INVOKE_RECIPES.json
 LOCAL_ROUTING_NOTES.md
 *.log
 *.tmp

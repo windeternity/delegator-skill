@@ -108,7 +108,7 @@ Clone or download this repository, then copy it into your Codex skills directory
 
 ```powershell
 git clone https://github.com/windeternity/delegator-skill.git
-$dest = "$env:USERPROFILE\.codex\skills\delegator"
+$dest = "$env:USERPROFILE\.codex\skills\agent-file-coordination"
 New-Item -ItemType Directory -Path $dest -Force | Out-Null
 Get-ChildItem .\delegator-skill -Force |
   Where-Object { $_.Name -notin @(".git", ".github", ".claude", ".codex", ".agent-inbox") } |
@@ -126,7 +126,7 @@ rsync -a --delete \
   --exclude='.claude' \
   --exclude='.codex' \
   --exclude='.agent-inbox' \
-  delegator-skill/ ~/.codex/skills/delegator/
+  delegator-skill/ ~/.codex/skills/agent-file-coordination/
 ```
 
 For other coordinator platforms that support custom skills, prompts, or context directories, copy `SKILL.md`, `references/`, and `docs/CODEX_FIRST_OPERATING_MODEL.md` into that platform's supported directory.
@@ -151,7 +151,7 @@ Use the Delegator skill. Create a demo two-agent plan for a read-only review and
 
 A good result includes explicit `Agent Name`, `Permission Scope`, `Workspace Mode`, `Guardrails`, `Acceptance Criteria`, `Report Path`, report trust fields, and no hard-coded paths or vendor names.
 
-On your **first delegation**, the agent interviews you once and saves your config (available workers/CLIs, model preferences, automation level) to the project-local roster, then reuses it. What it needs depends on your automation level — CAL-1/CAL-2 accept any worker you relay; CAL-3 requires a verified callable CLI. See [First Run](docs/FIRST_RUN.md).
+On the **first skill trigger**, the agent records your CAL and worker defaults in the install-local `LOCAL_ROSTER.md`, shared across projects. A project roster is an explicit override only. CAL-1/CAL-2 accept user-relayed external workers; CAL-3 requires a verified callable CLI. See [First Run](docs/FIRST_RUN.md).
 
 ### Validation
 
@@ -172,7 +172,8 @@ python scripts/check-public-safety.py .                             # scan for s
 ## Documentation
 
 **Getting started**
-- [First Run](docs/FIRST_RUN.md) — start here: what the agent asks you on first delegation, and how requirements differ by automation level
+- [Minimal Loop](docs/MINIMAL_LOOP.md) — **First successful loop: read this before the full Quickstart.** Five steps, four files, zero chat relay.
+- [First Run](docs/FIRST_RUN.md) — what the agent asks you on first delegation, and how requirements differ by automation level
 - [Quickstart](docs/QUICKSTART.md) — minimal setup and smoke test
 - [Architecture](docs/ARCHITECTURE.md) — project structure, file roles, and data flow
 - [Hydration Guide](docs/HYDRATION_GUIDE.md) — first-use template hydration flow
