@@ -26,12 +26,17 @@ Markdown files and reports:
   3. `schema_version` consistency in Markdown frontmatter and `.jsonl` event
      log records. The expected current value is `0.1.0`.
 
+  4. Delegator's first-use contract on a full repository surface: built-in
+     subagents are forbidden throughout an active turn, the CAL presence check
+     precedes routing, and install-local state is the canonical default.
+
 Exits 0 on success and 1 on any finding, so it is safe to use in CI.
 
 Usage:
     python -B scripts/audit-docs.py [target]
 """
 
+import ast
 import json
 import os
 import re
@@ -303,6 +308,173 @@ def check_schema_version(doc_files, errors):
                     )
 
 
+def _is_ask_cal_print(statement):
+    if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
+        return False
+    call = statement.value
+    if not isinstance(call.func, ast.Name) or call.func.id != "print" or not call.args:
+        return False
+    value = call.args[0]
+    return isinstance(value, ast.Constant) and value.value == "next_action: ASK_CAL"
+
+
+def _is_return_one(statement):
+    return (
+        isinstance(statement, ast.Return)
+        and isinstance(statement.value, ast.Constant)
+        and statement.value.value == 1
+    )
+
+
+def _check_ask_cal_return_blocks(statements, missing_lines):
+    """Require a direct ASK_CAL print before each return 1 in its branch."""
+    seen_ask = False
+    for statement in statements:
+        if _is_ask_cal_print(statement):
+            seen_ask = True
+        if _is_return_one(statement) and not seen_ask:
+            missing_lines.append(getattr(statement, "lineno", 0))
+        for attr in ("body", "orelse", "finalbody"):
+            child = getattr(statement, attr, None)
+            if isinstance(child, list):
+                _check_ask_cal_return_blocks(child, missing_lines)
+        handlers = getattr(statement, "handlers", None)
+        if isinstance(handlers, list):
+            for handler in handlers:
+                _check_ask_cal_return_blocks(handler.body, missing_lines)
+
+
+def check_delegator_contract(target, errors):
+    """Enforce the coordinator boundary and deterministic first-use sequence."""
+    if not os.path.isdir(target):
+        return
+
+    rel_paths = (
+        "SKILL.md",
+        "agents/openai.yaml",
+        "references/coordination-routing-policy.md",
+        "references/session-bootstrap-gate.md",
+        "docs/FIRST_RUN.md",
+        "scripts/afc-first-run-config.py",
+    )
+    paths = {rel: os.path.join(target, *rel.split("/")) for rel in rel_paths}
+    present = {rel: os.path.isfile(path) for rel, path in paths.items()}
+    if not all(present.values()):
+        # Partial audit fixtures intentionally contain only SKILL.md or one
+        # isolated surface. A repo-like or multi-surface target must fail
+        # closed instead of silently disabling the contract check.
+        repo_like = (
+            sum(1 for value in present.values() if value) >= 2
+        )
+        if repo_like:
+            for rel, exists in present.items():
+                if not exists:
+                    errors.append(
+                        "DELEGATOR CONTRACT: required surface is missing: {}".format(rel)
+                    )
+        return
+
+    text = {rel: _read_text(path) for rel, path in paths.items()}
+    flat = {rel: " ".join(value.lower().split()) for rel, value in text.items()}
+
+    boundary_needles = (
+        "while delegator is active",
+        "exploration, review, implementation, or fallback",
+    )
+    for rel in ("SKILL.md", "agents/openai.yaml"):
+        for needle in boundary_needles:
+            if needle not in flat[rel]:
+                errors.append(
+                    f"DELEGATOR CONTRACT: {rel} must contain active-turn boundary: {needle}"
+                )
+
+    mandatory = text["SKILL.md"].split("## Mandatory First Command", 1)
+    if len(mandatory) != 2:
+        errors.append("DELEGATOR CONTRACT: SKILL.md lacks Mandatory First Command")
+    else:
+        body = mandatory[1].split("\n## ", 1)[0]
+        lines = [line.strip() for line in body.splitlines()]
+        check_idx = next(
+            (
+                index for index, line in enumerate(lines)
+                if "afc-first-run-config.py" in line and "--check-only" in line
+            ),
+            -1,
+        )
+        blast_idx = next(
+            (index for index, line in enumerate(lines) if "afc-blast-radius.py" in line),
+            -1,
+        )
+        route_idx = next(
+            (index for index, line in enumerate(lines) if "afc-route.py" in line),
+            -1,
+        )
+        if min(check_idx, blast_idx, route_idx) < 0 or not (
+            check_idx < blast_idx < route_idx
+        ):
+            errors.append(
+                "DELEGATOR CONTRACT: SKILL.md must order check-only before "
+                "blast-radius and routing"
+            )
+
+    try:
+        runtime_tree = ast.parse(text["scripts/afc-first-run-config.py"])
+    except SyntaxError as exc:
+        errors.append(
+            "DELEGATOR CONTRACT: first-run helper is not valid Python: {}".format(exc)
+        )
+    else:
+        check_function = next(
+            (
+                node for node in runtime_tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == "cmd_check_only"
+            ),
+            None,
+        )
+        if check_function is None:
+            errors.append(
+                "DELEGATOR CONTRACT: first-run helper lacks cmd_check_only"
+            )
+        else:
+            missing_lines = []
+            _check_ask_cal_return_blocks(check_function.body, missing_lines)
+            if missing_lines:
+                errors.append(
+                    "DELEGATOR CONTRACT: cmd_check_only return 1 lacks a direct "
+                    "next_action: ASK_CAL print near line(s): {}".format(
+                        ", ".join(str(line) for line in missing_lines)
+                    )
+                )
+
+    canonical_needles = (
+        "install-local",
+        "local_roster.md",
+        "explicit project override",
+    )
+    for rel in (
+        "references/coordination-routing-policy.md",
+        "references/session-bootstrap-gate.md",
+        "docs/FIRST_RUN.md",
+    ):
+        for needle in canonical_needles:
+            if needle not in flat[rel]:
+                errors.append(
+                    f"DELEGATOR CONTRACT: {rel} lacks canonical roster state: {needle}"
+                )
+
+    bootstrap = flat["references/session-bootstrap-gate.md"]
+    if "once per coordinator session" not in bootstrap:
+        errors.append(
+            "DELEGATOR CONTRACT: session bootstrap must define the presence "
+            "check as once per coordinator session"
+        )
+    for stale in ("once per project regardless", "first delegator invocation per thread"):
+        if stale in bootstrap:
+            errors.append(
+                f"DELEGATOR CONTRACT: session bootstrap contains stale frequency: {stale}"
+            )
+
+
 def check_skill_size(target, errors, warnings):
     """Enforce the SKILL.md installed-weight budget.
 
@@ -370,6 +542,7 @@ def main():
     check_links(doc_files, errors)
     check_terminology(doc_files, errors)
     check_schema_version(doc_files, errors)
+    check_delegator_contract(target, errors)
     check_skill_size(target, errors, warnings)
     check_surface_growth(target, warnings)
 

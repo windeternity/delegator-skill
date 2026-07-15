@@ -35,10 +35,12 @@ profile state.
 
 Choose a CAL level only after Layer 1 says coordination is worth using.
 
-Exception: the CAL default is chosen once, at the first skill trigger, before
-Layer 1 — a presence check on `.agent-inbox/AGENT_ROSTER.md` only, which is the
-sole exception to the route-before-read invariant (see `SKILL.md` First-Run CAL
-Init). Once recorded, it governs Layer 2 and is not re-asked.
+Exception: at the first Delegator activation in each coordinator session,
+before Layer 1, run the cheap presence check against the install-local
+`LOCAL_ROSTER.md`. The persisted CAL choice belongs to the install-local user
+profile and is shared across projects; `.agent-inbox/AGENT_ROSTER.md` is used
+only as an explicit project override. Once configured, the check
+does not re-open onboarding (see `SKILL.md` First-Run CAL Init).
 
 | CAL | Use when | Default posture |
 | --- | --- | --- |
@@ -49,9 +51,11 @@ Init). Once recorded, it governs Layer 2 and is not re-asked.
 CAL level does not expand permission. Task `permission_scope`, locked areas,
 and explicit release authorization remain binding.
 
-CAL workers must be external to the current coordinator session. Do not satisfy
-a requested worker or model alias by launching a current-session subagent or
-`multi_agent.spawn_agent`.
+While Delegator is active, never call a current-session subagent, built-in
+helper, or `multi_agent.spawn_agent` for exploration, review, implementation,
+or fallback. `DIRECT` means the coordinator itself executes; LITE/FULL/CAL use
+only rostered external routes. A separate host multi-agent path is allowed only
+after the user explicitly asks to leave Delegator.
 
 ## Layer 3: Worker Route
 
@@ -69,14 +73,16 @@ recipes.
 
 ## Default Procedure
 
-1. Classify the task shape and declared files.
-2. If the task is small or directly answerable, use `NO_SKILL` or `DIRECT`.
-3. If delegation might help, run `scripts/afc-blast-radius.py` for declared
+1. Run `afc-first-run-config.py --check-only` against the Skill root; if no CAL
+   default is recorded, complete First-Run CAL Init before routing.
+2. Classify the task shape and declared files.
+3. If the task is small or directly answerable, use `NO_SKILL` or `DIRECT`.
+4. If delegation might help, run `scripts/afc-blast-radius.py` for declared
    files, then `scripts/afc-route.py`.
-4. If route is `DIRECT`, stop AFC startup and execute directly.
-5. If route is `LITE` or `FULL`, choose CAL level.
-6. If CAL-3 is selected, choose a worker from the CAL-3 routing policy.
-7. Keep commit, push, release, deploy, destructive actions, secrets, and
+5. If route is `DIRECT`, stop AFC startup and execute directly.
+6. If route is `LITE` or `FULL`, choose CAL level.
+7. If CAL-3 is selected, choose a worker from the CAL-3 routing policy.
+8. Keep commit, push, release, deploy, destructive actions, secrets, and
    permission expansion behind explicit authorization.
 
 ## Promotion Boundary

@@ -132,6 +132,35 @@ def to_bash_path(win_path):
     return s
 
 
+def write_usable_roster(inbox):
+    """Hydrate the init template with one external user-relay worker."""
+    roster = f"""---
+schema: agent-file-coordination/roster
+schema_version: 0.1.0
+---
+
+# Agent Roster
+
+<!-- SESSION PREFERENCES
+Default CAL: CAL-1
+Execution preference: fixture external user-relay
+Available resources: external user-relay workers
+Available now: {AGENT_NAME}
+Model preference order: fixture model
+Avoid / unavailable: none
+Smoke tests: fixture
+Confirmed: {FIXED_DATE}
+Change policy: fixture
+-->
+
+| Agent Name | Role | Tool | Model | Provider / Access Path | Protocol Mode | Coordinator Authority | Can Edit | Can Run Commands | Can Write Reports | Browser / Visual | Worktree Capability | Best Use | Avoid | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| {AGENT_NAME} | implementer | external-chat | user-relay-model | user-relay:{AGENT_NAME} | task-only | no | yes | read_only | yes | no | manual_needed | e2e fixture work | none | external user-relay worker |
+"""
+    with open(os.path.join(inbox, "AGENT_ROSTER.md"), "w", encoding="utf-8", newline="\n") as f:
+        f.write(roster)
+
+
 # ---------------------------------------------------------------------------
 # Spec content (inline to keep the fixture self-contained)
 # ---------------------------------------------------------------------------
@@ -268,6 +297,8 @@ def stage_a_init(tmp_project, bash_path):
     if ok:
         for name in ("AGENT_ROSTER.md", "STATUS.md", "WORKTREE_LOCKS.md", "events.jsonl"):
             check(f"  {name} exists", os.path.isfile(os.path.join(inbox, name)))
+        write_usable_roster(inbox)
+        check("  AGENT_ROSTER.md hydrated", os.path.isfile(os.path.join(inbox, "AGENT_ROSTER.md")))
     return ok
 
 
@@ -441,9 +472,8 @@ def stage_i_cross_check(tmp_project):
     print("\n--- Stage I: validate-agent-inbox --cross-check ---")
     inbox = os.path.join(tmp_project, ".agent-inbox")
 
-    # The afc-init templates have placeholder values, so we must use
-    # --template-mode for the template-generated files (ROSTER, WORKTREE_LOCKS)
-    # to pass validation.  --cross-check runs alongside and verifies
+    # WORKTREE_LOCKS remains template-generated, so we use --template-mode.
+    # --cross-check runs alongside and verifies
     # cross-file consistency for real artifacts (task, report, verdict).
     run(
         "validate --template-mode --cross-check",

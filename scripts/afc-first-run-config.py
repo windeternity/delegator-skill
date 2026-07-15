@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """First-run configuration helper for Delegator.
 
-Reads/updates the SESSION PREFERENCES block in .agent-inbox/AGENT_ROSTER.md
-and appends a ROSTER_UPDATED event to events.jsonl.
+Reads/updates the SESSION PREFERENCES block in the resolved roster (default:
+the install-local LOCAL_ROSTER.md in the Skill directory). Project
+.agent-inbox/AGENT_ROSTER.md is an explicit override only, not the default
+destination. No project events.jsonl is written.
 
 Python stdlib only. Python 3.8+ compatible.
 
@@ -25,17 +27,65 @@ Usage:
 """
 
 import argparse
-import json
 import os
 import re
 import sys
 from datetime import datetime
+
+from afc_roster import roster_status, resolve_roster, local_roster_path, skill_root
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 VALID_CALS = {"CAL-1", "CAL-2", "CAL-3"}
+
+
+def _local_roster_template_path():
+    """Template used to scaffold a fresh install-local LOCAL_ROSTER.md."""
+    return os.path.join(skill_root(), "templates", "TEMPLATE_LOCAL_ROSTER.md")
+
+
+def _write_target_roster(inbox_dir, explicit_roster_file=None):
+    """Where --default-cal writes.
+
+    Priority mirrors resolve_roster():
+      1. explicit --roster-file / AFC_ROSTER_FILE
+      2. an already-active project override at <inbox>/AGENT_ROSTER.md
+         (has the AFC_ROSTER_SCOPE: project-override marker) — write there so
+         the same file that dispatch resolves to receives the CAL default
+      3. install-local LOCAL_ROSTER.md
+    Never writes to an unmarked project inbox.
+    """
+    explicit = explicit_roster_file or os.environ.get("AFC_ROSTER_FILE")
+    if explicit:
+        return os.path.abspath(explicit)
+    if inbox_dir:
+        _, source = resolve_roster(inbox_dir)
+        if source == "project-override":
+            return os.path.join(inbox_dir, "AGENT_ROSTER.md")
+    return local_roster_path()
+
+
+# Minimal fallback used only if TEMPLATE_LOCAL_ROSTER.md is unavailable.
+_LOCAL_ROSTER_SKELETON = """\
+---
+schema: agent-file-coordination/roster
+schema_version: 0.1.0
+---
+<!-- LOCAL-ONLY: never commit. User-level roster source of truth. -->
+
+# Local Agent Roster
+
+<!-- SESSION PREFERENCES
+Default CAL: <CAL-1_OR_CAL-2_OR_CAL-3>
+Change policy: keep these defaults until the user asks to change them or a route becomes unavailable.
+-->
+
+| Agent Name | Role | Tool | Model | Provider / Access Path | Protocol Mode | Coordinator Authority | Can Edit | Can Run Commands | Can Write Reports | Browser / Visual | Worktree Capability | Best Use | Avoid | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+"""
+
 
 # Patterns that look like secrets or sensitive data.
 SECRET_PATTERNS = [
@@ -59,7 +109,8 @@ Session Bootstrap:
   CAL-1  Manual Relay — you paste handoffs, any worker works
   CAL-2  Auto Intake — you paste handoff, coordinator auto-detects report
   CAL-3  Full Auto — coordinator launches workers via local CLI (requires CLI verification)
-- Record these as this project's default until I ask to change them?
+- Record these in the install-local user-profile default shared across projects
+  (unless the resolved roster is an explicit project override)?
 """
 
 
@@ -84,28 +135,6 @@ def redact_secrets(text):
             found.append(m.group())
             cleaned = cleaned.replace(m.group(), "[REDACTED]", 1)
     return cleaned, found
-
-
-def next_event_id(events_path):
-    """Read events.jsonl and return the next sequential event_id."""
-    max_num = 0
-    if os.path.isfile(events_path):
-        with open(events_path, "r", encoding="utf-8-sig") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    evt = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if not isinstance(evt, dict):
-                    continue
-                eid = evt.get("event_id", "")
-                m = re.match(r"evt-(\d+)", eid)
-                if m:
-                    max_num = max(max_num, int(m.group(1)))
-    return "evt-{:03d}".format(max_num + 1)
 
 
 def parse_session_preferences(roster_text):
@@ -260,12 +289,30 @@ def recommend_cal(resources, available_now):
 # Commands
 # ---------------------------------------------------------------------------
 
-def cmd_check_only(inbox_dir):
-    """Check if SESSION PREFERENCES has a valid CAL default. Exit 0=yes, 1=no."""
-    roster_path = os.path.join(inbox_dir, "AGENT_ROSTER.md")
-    if not os.path.isfile(roster_path):
+def cmd_check_only(inbox_dir, explicit_roster_file=None):
+    """Check if the resolved roster has a valid CAL default. Exit 0=yes, 1=no.
+
+    First-run initialization is a user-level question: is there an
+    explicit/global roster the user has configured? A project-legacy-fallback
+    roster is a per-project compatibility source for dispatch; it does NOT
+    satisfy 'once per user' initialization, otherwise every new project would
+    silently reuse its own old AGENT_ROSTER.md and LOCAL_ROSTER.md would never
+    be created. Legacy fallback => NOT_CONFIGURED here (dispatch --roster-status
+    stays permissive)."""
+    roster_path, source = resolve_roster(inbox_dir, explicit_roster_file=explicit_roster_file)
+    if not roster_path or not os.path.isfile(roster_path):
         print("NOT_CONFIGURED")
-        print("reason: AGENT_ROSTER.md not found")
+        print("reason: no roster resolved (configure LOCAL_ROSTER.md in the Skill dir)")
+        print("roster_source: {}".format(source))
+        print("next_action: ASK_CAL")
+        return 1
+    if source == "project-legacy-fallback":
+        print("NOT_CONFIGURED")
+        print("reason: only an unmarked project AGENT_ROSTER.md is present; "
+              "LOCAL_ROSTER.md has not been configured yet")
+        print("roster_source: {}".format(source))
+        print("next_action: ASK_CAL")
+        print("configure_command: run --default-cal to write LOCAL_ROSTER.md (shared across projects)")
         return 1
     with open(roster_path, "r", encoding="utf-8") as f:
         text = f.read()
@@ -274,12 +321,38 @@ def cmd_check_only(inbox_dir):
         print("CONFIGURED")
         print("default_cal: {}".format(prefs.get("default_cal", "")))
         print("confirmed: {}".format(prefs.get("confirmed", "")))
+        print("roster_source: {}".format(source))
         return 0
     else:
         print("NOT_CONFIGURED")
         if prefs:
             print("default_cal: {}".format(prefs.get("default_cal", "<unset>")))
+        print("roster_source: {}".format(source))
+        print("next_action: ASK_CAL")
         return 1
+
+
+def cmd_roster_status(inbox_dir, dispatch_mode="user-relay", explicit_roster_file=None):
+    """Print the full read-only roster dispatch status."""
+    status = roster_status(
+        inbox_dir,
+        require_cal3=(dispatch_mode == "cal-3"),
+        explicit_roster_file=explicit_roster_file,
+    )
+    for key in [
+        "roster_status",
+        "roster_source",
+        "roster_path",
+        "external_worker_routes",
+        "cal_default_recorded",
+        "cal3_callable_routes",
+        "blocking_reason",
+        "recommended_next_action",
+    ]:
+        print("{}: {}".format(key, status.get(key, "")))
+    if status.get("warning"):
+        print("warning: {}".format(status["warning"]), file=sys.stderr)
+    return 0 if status.get("roster_status") == "usable" else 1
 
 
 def cmd_print_questionnaire():
@@ -288,9 +361,15 @@ def cmd_print_questionnaire():
     return 0
 
 
-def cmd_write(inbox_dir, default_cal, resources, available_now,
-              model_order, avoid, capability_limits, confirmed_at):
-    """Write configuration into AGENT_ROSTER.md and append event."""
+def cmd_write(default_cal, resources, available_now,
+              model_order, avoid, capability_limits, confirmed_at,
+              explicit_roster_file=None, inbox_dir=None):
+    """Write configuration into the resolved roster (default LOCAL_ROSTER.md,
+    or the active project override at <inbox>/AGENT_ROSTER.md when one is
+    already marked).
+
+    Scaffolds from TEMPLATE_LOCAL_ROSTER.md if the target does not exist. Does
+    not write any project events.jsonl."""
     # Validate CAL
     if default_cal not in VALID_CALS:
         print("ERROR: invalid CAL '{}'. Must be one of: {}".format(
@@ -317,21 +396,24 @@ def cmd_write(inbox_dir, default_cal, resources, available_now,
                   file=sys.stderr)
             return 1
 
-    # Ensure inbox exists
-    if not os.path.isdir(inbox_dir):
-        print("ERROR: inbox directory not found: {}".format(inbox_dir),
+    roster_path = _write_target_roster(inbox_dir, explicit_roster_file)
+    roster_dir = os.path.dirname(roster_path)
+    if roster_dir and not os.path.isdir(roster_dir):
+        print("ERROR: roster directory not found: {}".format(roster_dir),
               file=sys.stderr)
         return 1
 
-    roster_path = os.path.join(inbox_dir, "AGENT_ROSTER.md")
-    if not os.path.isfile(roster_path):
-        print("ERROR: AGENT_ROSTER.md not found in {}".format(inbox_dir),
-              file=sys.stderr)
-        return 1
-
-    # Read existing roster
-    with open(roster_path, "r", encoding="utf-8") as f:
-        roster_text = f.read()
+    # Read existing roster, or scaffold from the install-local template.
+    if os.path.isfile(roster_path):
+        with open(roster_path, "r", encoding="utf-8") as f:
+            roster_text = f.read()
+    else:
+        template = _local_roster_template_path()
+        if os.path.isfile(template):
+            with open(template, "r", encoding="utf-8") as f:
+                roster_text = f.read()
+        else:
+            roster_text = _LOCAL_ROSTER_SKELETON
 
     # Build new preferences block
     prefs_block = build_preferences_block(
@@ -365,29 +447,10 @@ def cmd_write(inbox_dir, default_cal, resources, available_now,
                 except OSError:
                     pass
 
-    # Append ROSTER_UPDATED event
-    events_path = os.path.join(inbox_dir, "events.jsonl")
-    event = {
-        "schema": "agent-file-coordination/event",
-        "schema_version": "0.1.0",
-        "event_id": next_event_id(events_path),
-        "event_type": "ROSTER_UPDATED",
-        "created_at": confirmed_at,
-        "summary": "First-run config: CAL={}, resources recorded.".format(
-            default_cal),
-    }
-    try:
-        with open(events_path, "a", encoding="utf-8", newline="\n") as f:
-            f.write(json.dumps(event, ensure_ascii=False) + "\n")
-    except OSError as e:
-        print("ERROR: failed to append event: {}".format(e), file=sys.stderr)
-        return 1
-
     print("OK")
     print("default_cal: {}".format(default_cal))
     print("confirmed: {}".format(confirmed_at))
     print("roster: {}".format(roster_path))
-    print("event: {}".format(event["event_id"]))
     return 0
 
 
@@ -413,9 +476,32 @@ def build_parser():
         help="Path to .agent-inbox directory (default: .agent-inbox)",
     )
     parser.add_argument(
+        "--roster-file",
+        default=None,
+        help="Explicit roster path (overrides resolver; also AFC_ROSTER_FILE).",
+    )
+    parser.add_argument(
+        "--skill-root",
+        default=None,
+        help=("Test/dev override of the installed Skill root (also "
+              "AFC_SKILL_ROOT). NOT a project path — pass --inbox <DIR> for "
+              "the project's .agent-inbox instead."),
+    )
+    parser.add_argument(
         "--check-only",
         action="store_true",
         help="Check if CAL default is configured. Exit 0=yes, 1=no.",
+    )
+    parser.add_argument(
+        "--roster-status",
+        action="store_true",
+        help="Read-only full roster usability check for external dispatch.",
+    )
+    parser.add_argument(
+        "--dispatch-mode",
+        choices=("lite", "cal-1", "cal-2", "cal-3", "user-relay"),
+        default="user-relay",
+        help="Requested dispatch mode for --roster-status (default: user-relay).",
     )
     parser.add_argument(
         "--print-questionnaire",
@@ -441,6 +527,9 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
+    if args.skill_root:
+        os.environ["AFC_SKILL_ROOT"] = os.path.abspath(args.skill_root)
+
     if args.print_questionnaire:
         return cmd_print_questionnaire()
 
@@ -450,14 +539,16 @@ def main():
     inbox = os.path.abspath(args.inbox)
 
     if args.check_only:
-        return cmd_check_only(inbox)
+        return cmd_check_only(inbox, args.roster_file)
+
+    if args.roster_status:
+        return cmd_roster_status(inbox, args.dispatch_mode, args.roster_file)
 
     if args.default_cal:
         confirmed = args.confirmed_at
         if not confirmed:
             confirmed = datetime.now().strftime("%Y-%m-%d")
         return cmd_write(
-            inbox,
             args.default_cal,
             args.resources,
             args.available_now,
@@ -465,6 +556,8 @@ def main():
             args.avoid,
             args.capability_limits,
             confirmed,
+            args.roster_file,
+            inbox,
         )
 
     parser.print_help()

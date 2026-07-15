@@ -15,14 +15,14 @@ the final project verdict.
 
 ## Session Bootstrap
 
-1. If no project-local resource inventory and execution preference are
-   recorded, ask the user for their existing and currently available tools,
+1. If the resolved install-local roster or explicit project override is not
+   usable, ask the user for their existing and currently available tools,
    providers/accounts, local runtimes, CLI aliases, model preference order,
    avoid list, capability limits, and CAL-1 vs CAL-2 choice before the first
    external dispatch.
-2. Record the confirmed preference in `.agent-inbox/AGENT_ROSTER.md` and append
-   a `ROSTER_UPDATED` event. Use it as the default until the user asks to
-   change it or the route becomes unavailable.
+2. Record the confirmed preference in install-local `LOCAL_ROSTER.md` by
+   default. Use `.agent-inbox/AGENT_ROSTER.md` plus a `ROSTER_UPDATED` event
+   only when the user explicitly requests a project override.
 3. Choose CAL-1 manual relay or CAL-2 auto intake. CAL-3 remains deferred.
 4. Read or hydrate `.agent-inbox/AGENT_ROSTER.md` once.
 5. Confirm each worker's canonical name, tool/model, edit/command capability,
@@ -41,8 +41,9 @@ References:
 ## Task Assignment
 
 Use `afc-assign.py` with `routing.*` evidence. New work without routing evidence
-is invalid. Generated tasks must stay at or below 4 KB; replace pasted context
-with paths or artifact pointers.
+is invalid; never pass `--legacy-unrouted` for new work, which emits unrouted
+tasks that bypass this gate. Generated tasks must stay at or below 4 KB; replace
+pasted context with paths or artifact pointers.
 
 Each task defines:
 
@@ -284,6 +285,12 @@ metadata.
 
 Use one snapshot at session resume. At 50% coordinator context, compact; at 80%,
 write a new-thread handoff. Avoid carrying closed-worker detail across turns.
+
+Per FULL batch, hold a one-pass frequency budget: one route, one roster
+confirmation, one dispatch batch, one intake, at most one consolidated repair
+round before escalation, one integrated gate, one close. Do not repeat Git,
+validator, report-read, or full-test commands when only coordination metadata
+changed.
 
 See:
 

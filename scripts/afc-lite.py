@@ -6,6 +6,7 @@ import json
 import os
 import sys
 
+from afc_roster import format_roster_block, maybe_warn_roster, require_usable_roster
 from afc_routing import evaluate_route
 
 
@@ -22,6 +23,7 @@ def build_parser():
     )
     parser.add_argument("--agent", required=True)
     parser.add_argument("--workspace", required=True)
+    parser.add_argument("--inbox")
     parser.add_argument("--task", required=True)
     parser.add_argument("--allow-files", required=True)
     parser.add_argument("--validation", default="none")
@@ -59,6 +61,18 @@ def main():
         return 1
 
     workspace = os.path.abspath(args.workspace)
+    inbox = os.path.abspath(args.inbox or os.path.join(workspace, ".agent-inbox"))
+    if not os.path.isdir(inbox):
+        print(
+            "error: lite handoff refused; roster inbox not found: {}".format(inbox),
+            file=sys.stderr,
+        )
+        return 1
+    ok, status = require_usable_roster(inbox, agent_name=args.agent)
+    maybe_warn_roster(status)
+    if not ok:
+        print(format_roster_block(status), file=sys.stderr)
+        return 1
     if args.language == "zh":
         handoff = "\n".join([
             "你是 {}。".format(args.agent),

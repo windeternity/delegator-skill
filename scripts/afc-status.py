@@ -23,18 +23,15 @@ from datetime import date, timedelta
 from afc_event import add_event_context, append_event_once
 from afc_frontmatter import parse_frontmatter_flat as parse_frontmatter
 from afc_fsutil import atomic_write
+from afc_constants import (
+    CLOSED_STATUSES,
+    REPORT_BUDGET_BYTES,
+    REVIEW_REPORT_BUDGET_BYTES,
+    TASK_BUDGET_BYTES,
+)
 
 # I3 hygiene hint constants
 ACTIVE_INBOX_HINT_LIMIT_BYTES = 100 * 1024
-TASK_BUDGET_BYTES = 4 * 1024
-REPORT_BUDGET_BYTES = 3 * 1024
-REVIEW_REPORT_BUDGET_BYTES = 5 * 1024
-CLOSED_GO = "CLOSED_GO"
-CLOSED_PARTIAL = "CLOSED_PARTIAL"
-CLOSED_RED = "CLOSED_RED"
-CANCELLED = "CANCELLED"
-SUPERSEDED = "SUPERSEDED"
-CLOSED_STATUSES = (CLOSED_GO, CLOSED_PARTIAL, CLOSED_RED, CANCELLED, SUPERSEDED)
 
 # Stale undispatched hint threshold (days)
 STALE_UNDISPATCHED_DAYS = 1
@@ -227,6 +224,9 @@ def main():
         elif args[i] == "--summary-only":
             summary_only = True
             no_write = True
+        elif args[i] in ("--help", "-h"):
+            print("usage: python -B scripts/afc-status.py [--dry-run] [--no-write] [--summary-only] [--updated-at YYYY-MM-DD] <INBOX_DIR>")
+            return 0
         elif args[i] == "--updated-at":
             if i + 1 >= len(args):
                 print("error: --updated-at requires a YYYY-MM-DD value", file=sys.stderr)

@@ -15,7 +15,22 @@ paying coordination cost. MOA can justify FULL; trivial work stays DIRECT.
 Route before reading a roster, template, inbox, report, or worker profile. A
 `DIRECT` task must stop the Delegator workflow immediately. Do not create
 coordination artifacts to justify a decision already known direct. The sole
-exception is the First-Run CAL Init presence check.
+exception is the First-Run CAL Init presence check. Onboarding and gates are
+one-time; do not recur them (`references/session-bootstrap-gate.md`).
+
+## External Worker Boundary
+
+While Delegator is active, never call current-session subagents, built-in
+helpers, `multi_agent`, or coordinator-runtime chat for exploration, review,
+implementation, or fallback. `DIRECT` means this coordinator executes. Only an
+explicit user request to leave Delegator permits a separate host multi-agent path.
+Run the roster usable gate only after route selects `LITE`, `FULL`, or CAL
+external dispatch. `DIRECT` still reads no full roster and creates no artifacts.
+If no rostered external route exists, stop/ask or route `DIRECT`. The gate
+resolves the roster from the install-local `LOCAL_ROSTER.md` by default; a
+project `.agent-inbox/AGENT_ROSTER.md` is an explicit override only. After
+routing to external dispatch, run `scripts/afc-first-run-config.py --inbox
+<DIR> --roster-status` and obey a non-zero exit before any task generation.
 
 ## Align Before Routing
 
@@ -25,31 +40,44 @@ before routing; else state assumptions in one line (`references/task-intake-and-
 
 ## First-Run CAL Init
 
-The sole exception to the Cost Invariant. Once per project, before first
-routing: presence-check whether `.agent-inbox/AGENT_ROSTER.md` records a CAL
-default (not a full inbox read). If recorded, skip. If not, explain
-CAL-1/CAL-2/CAL-3 and ask the user to pick a default; record in roster/events,
-reuse until changed. Runs even for a `DIRECT` task, so the default is collected
-once and never blocks later delegation; the `DIRECT` task then proceeds without
-hydrating further inbox state. CAL-3 is a valid default; its dispatch gate
-(`docs/FIRST_RUN.md` §4) still applies. Helper: `docs/FIRST_RUN.md` §8.
+The sole exception to the Cost Invariant. At first Delegator activation in each
+coordinator session, before routing, cheaply check the install-local
+`LOCAL_ROSTER.md`. A recorded CAL default skips onboarding. Otherwise orient
+once, ask for a default, and write it to that user-profile file, shared across
+projects. If work must continue without an answer, use CAL-1 for that invocation
+only. CAL-3 remains dispatch-gated. Details: `references/session-bootstrap-gate.md`.
 
 ## Mandatory First Command
 
-Estimate the task from the request and run:
+Set `$SkillRoot` to the directory containing this `SKILL.md`; use absolute
+helper paths.
+
+Before blast-radius estimation or routing, the literal first command is:
 
 ```powershell
-python -B scripts\afc-route.py --estimated-direct-minutes <N> --independent-workstreams <N> --smallest-workstream-minutes <N> --specialized-capability <yes|no> --high-risk-independent-review <yes|no> --external-worker-required <yes|no> --semantic-change <yes|no> --expected-rounds <N> --context-bytes <N> --available-distinct-models <N> --blast-radius <low|medium|high>
+$SkillRoot = "<path-to-agent-file-coordination-skill>"
+python -B "$SkillRoot\scripts\afc-first-run-config.py" --skill-root "$SkillRoot" --check-only
 ```
 
-Fill `--blast-radius` via `scripts\afc-blast-radius.py --files <declared paths>`
-before routing.
+Exit 0 continues; exit 1 follows First-Run CAL Init. Next compute blast radius:
+
+```powershell
+python -B "$SkillRoot\scripts\afc-blast-radius.py" --files <declared paths>
+```
+
+Then estimate the task and route:
+
+```powershell
+python -B "$SkillRoot\scripts\afc-route.py" --estimated-direct-minutes <N> --independent-workstreams <N> --smallest-workstream-minutes <N> --specialized-capability <yes|no> --high-risk-independent-review <yes|no> --external-worker-required <yes|no> --semantic-change <yes|no> --expected-rounds <N> --context-bytes <N> --available-distinct-models <N> --blast-radius <low|medium|high>
+```
 
 Decisions:
 
 - `DIRECT`: execute directly. Do not read or hydrate `.agent-inbox/`.
-- `LITE`: one compact external-worker handoff; no inbox artifacts.
-- `FULL`: load the full protocol reference; use no more than `max_workers`.
+- `LITE`: after route, require `roster_status=usable`; emit one compact
+  external-worker handoff with no task/status/event artifacts.
+- `FULL`: after route, require `roster_status=usable`; load the full protocol
+  reference and use no more than `max_workers`.
 - `SPLIT`: reduce inline context or ambiguity, then route again.
 - `INVALID`: correct the routing evidence.
 
@@ -75,6 +103,9 @@ LITE is not the small-task default. It applies only when the user explicitly
 needs one external worker for a low-risk, non-semantic, single-round task
 >= 15 estimated minutes.
 
+Before a LITE handoff, gate the selected worker with `roster_status=usable`.
+Missing, placeholder-only, incomplete, unmatched, or internal routes block.
+
 ```powershell
 python -B scripts\afc-lite.py --agent <AGENT_NAME> --workspace <PROJECT_PATH> --task "<BOUNDED_TASK>" --allow-files "<FILES>" --validation "<COMMAND_OR_NONE>" --language <en|zh> --estimated-direct-minutes <N> --external-worker-required yes --semantic-change no
 ```
@@ -84,36 +115,8 @@ semantic uncertainty, scope expansion, or a repair loop (`references/lite-mode-v
 
 ## FULL
 
-Only after a FULL decision, read:
-
-```text
-references/full-coordination-protocol.md
-```
-
-Then use this bounded cycle:
-
-1. CAL default was chosen at first trigger. If no resource inventory is
-   recorded, run the first-use discovery gate before first dispatch: confirm
-   worker tools, providers/accounts, model prefs, avoid list, capability
-   limits. Record in roster/events; reuse until changed.
-2. Confirm the roster once. Model/CLI aliases must bind to rostered external
-   worker paths and access details, not current-session subagents.
-3. Generate routed tasks with `afc-assign.py`; never `--legacy-unrouted`
-   for new work.
-4. Dispatch all independent tasks as a batch.
-5. CAL-1: wait for the user to relay handoffs and report completion. CAL-2:
-   after printing handoffs, record `TASK_DISPATCHED` and start the foreground
-   inbox consumer in the same turn via `afc-cal2-arm.py --task-id <ID> --inbox
-   <INBOX>` (scoped to current task/report IDs). No "sent"/"done" ack.
-6. Workers generate compact reports via `afc-report.py`.
-7. Run `afc-intake.py --task-id <ID> --json <INBOX>` once per task in the batch.
-8. Issue one consolidated `NEEDS_FIX` with all known findings.
-9. After source convergence, run one integrated quality gate and issue verdicts.
-
-Frequency budget per FULL batch: one route, roster confirmation, dispatch
-batch, intake, at most one consolidated repair round before escalation, one
-integrated gate, one close. Do not repeat Git, validator, report-read, or
-full-test commands when only coordination metadata changed.
+Only after a FULL decision, read `references/full-coordination-protocol.md` —
+the bounded 9-step cycle and per-batch frequency budget live there.
 
 ## Authority And Safety
 
@@ -128,9 +131,9 @@ full-test commands when only coordination metadata changed.
   authorized for that exact action.
 - Never assign overlapping editable file locks without explicit approval.
 - External tools open the assigned workspace, never the coordination root.
-- No current-session subagents, `multi_agent`, or chat-only worker calls as
-  external workers. CAL-1/2 need user-relayed workers; CAL-3 needs
-  `afc-cal3-probe.py` / `afc-cal3-dispatch.py`.
+- Active Delegator turns never use current-session subagent or `multi_agent`
+  tools. CAL-1/2 need user-relayed external workers; CAL-3 needs verified CLI
+  routes via `afc-cal3-probe.py` / `afc-cal3-dispatch.py`.
 - Do not accept chat-only completion when report/worktree evidence is absent.
 
 For protocol/schema/permission/state-machine changes, apply
@@ -156,18 +159,11 @@ before arming `afc-watch.py` via `afc-cal2-arm.py`.
 
 ## References
 
-Read refs on demand; use snapshot/status for routine state (`docs/CACHE_HYGIENE.md`).
-Load on demand, never pre-emptively:
-
-- First run / mode setup: `docs/FIRST_RUN.md`
-- Task intake & alignment: `references/task-intake-and-alignment.md`
-- Full workflow & contracts: `references/full-coordination-protocol.md`
-- Routing/MOA: `references/delegation-routing-v1.md`, `references/moa-coordination-modes.md`
-- Verdict gates: `references/decision-rubric.md`
-- Worker rules: `references/worker-brief.md`
-- Worktrees: `references/worktree-layout.md`
-- Automation levels: `references/coordination-automation-levels.md`
-- Cache & context: `docs/CACHE_HYGIENE.md`
-- Hydration/examples: `docs/HYDRATION_GUIDE.md`, `docs/QUICKSTART.md`
+Load refs only when their route fires: `docs/FIRST_RUN.md`,
+`references/task-intake-and-alignment.md`, `references/full-coordination-protocol.md`,
+`references/delegation-routing-v1.md`, `references/moa-coordination-modes.md`,
+`references/decision-rubric.md`, `references/worker-brief.md`,
+`references/worktree-layout.md`, `references/coordination-automation-levels.md`,
+`docs/CACHE_HYGIENE.md`, `docs/HYDRATION_GUIDE.md`, and `docs/QUICKSTART.md`.
 
 Default deny: if a task does not explicitly allow an action, stop and ask.

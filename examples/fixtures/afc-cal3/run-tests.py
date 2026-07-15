@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -56,6 +57,8 @@ def task_text(
     modify="no",
     run_commands="none",
     network_access="none",
+    commit_push="no",
+    destructive_actions="no",
     report_name=None,
     locked="README.md",
 ):
@@ -76,8 +79,8 @@ permission_scope:
   modify_source: {modify}
   run_commands: {run_commands}
   network_access: {network_access}
-  commit_push: no
-  destructive_actions: no
+  commit_push: {commit_push}
+  destructive_actions: {destructive_actions}
 workspace:
   mode: existing_edit_worktree
   path: {workspace}
@@ -101,9 +104,37 @@ Do not create tasks, reassign work, approve final GO/PARTIAL/RED, or expand perm
         modify=modify,
         run_commands=run_commands,
         network_access=network_access,
+        commit_push=commit_push,
+        destructive_actions=destructive_actions,
         report_name=report_name,
         locked=locked,
     )
+
+
+def write_cal3_roster(inbox, agent_name="FakeWorker"):
+    write(os.path.join(inbox, "AGENT_ROSTER.md"), """---
+schema: agent-file-coordination/roster
+schema_version: 0.1.0
+---
+# Agent Roster
+
+<!-- SESSION PREFERENCES
+Default CAL: CAL-3
+Execution preference: fixture CAL-3 worker
+Available resources: probe-verified local fake worker
+Available now: {agent_name}
+Model preference order: fake
+Avoid / unavailable: none
+Smoke tests: fixture probe
+Confirmed: 2026-06-29
+Change policy: keep these defaults until the user asks to change them or a route becomes unavailable.
+-->
+
+| Agent Name | Role | Tool | Model | Provider / Access Path | Protocol Mode | Coordinator Authority | Can Edit | Can Run Commands | Can Write Reports | Browser / Visual | Worktree Capability | Best Use | Avoid | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Coordinator | coordinator | codex | coordinator-model | local coordinator | full-skill | yes | yes | bounded | yes | yes | can_use_existing | task decomposition, evidence review, final verdict | routine worker loops | fixture coordinator |
+| {agent_name} | implementer | fake-cli | fake-model | local fake worker | task-only | no | yes | bounded | yes | no | can_use_existing | fixture CAL-3 work | none | external callable worker |
+""".format(agent_name=agent_name))
 
 
 def make_inbox(mode="success", task_id="cal3-success", agent_name="FakeWorker"):
@@ -120,6 +151,7 @@ def make_inbox(mode="success", task_id="cal3-success", agent_name="FakeWorker"):
         "schema_version": "0.1.0",
         "default_permission_profile": "cal3-bounded-edit",
         "agent_recipes": {agent_name: "fake"},
+        "probes": [{"tool": "fake", "available": True, "backend": "fixture"}],
         "recipes": {
             "fake": {
                 "tool": "fake",
@@ -146,12 +178,16 @@ def make_inbox(mode="success", task_id="cal3-success", agent_name="FakeWorker"):
                     "cal3-bounded-edit": {},
                     "cal3-local-autonomous": {},
                     "cal3-local-autonomous-high": {},
+                    "cal3-network-readonly": {},
+                    "cal3-network-work": {},
+                    "cal3-approved-commit": {},
                     "cal3-release-gated": {},
                 },
             }
         },
     }
     write(os.path.join(inbox, "invoke-recipes.json"), json.dumps(recipe, indent=2))
+    write_cal3_roster(inbox, agent_name=agent_name)
     return root, inbox
 
 
@@ -202,6 +238,7 @@ def test_probe_codex_readonly_writes_report():
     env["AFC_CAL3_CODEX_EXE"] = codex_path
     # Ensure the native-backend path is exercised regardless of the outer env.
     env.pop("AFC_CAL3_CODEX_LAUNCHER", None)
+    env.pop("AFC_CAL3_CODEX_NETWORK_ACCESS", None)
     if os.name == "nt":
         mimo_path = os.path.join(bin_dir, "mimo.cmd")
         claude_path = os.path.join(bin_dir, "claude.cmd")
@@ -270,6 +307,21 @@ def test_probe_codex_readonly_writes_report():
             recipe = json.load(handle)
         if recipe["recipes"]["codex"].get("sandbox") != "workspace-write":
             raise AssertionError("codex recipe should declare workspace-write sandbox")
+        capability = recipe["recipes"]["codex"].get("capability") or {}
+        if capability.get("network_access") != "none":
+            raise AssertionError("codex recipe should not advertise network by default")
+        env_allowed = dict(env)
+        env_allowed["AFC_CAL3_CODEX_NETWORK_ACCESS"] = "allowed"
+        run(
+            "probe: codex network capability requires explicit opt-in",
+            [sys.executable, "-B", PROBE, "--inbox", inbox, "--write"],
+            env=env_allowed,
+        )
+        with open(recipe_path, "r", encoding="utf-8") as handle:
+            recipe = json.load(handle)
+        capability = recipe["recipes"]["codex"].get("capability") or {}
+        if capability.get("network_access") != "allowed":
+            raise AssertionError("codex network opt-in should declare capability allowed")
         sandbox = recipe["recipes"]["codex"]["profile_args"]["cal3-readonly"]["codex_sandbox"]
         if sandbox != "workspace-write":
             raise AssertionError("expected workspace-write, got {}".format(sandbox))
@@ -322,7 +374,9 @@ def test_probe_codex_launcher():
     write(launcher, "# fake launcher\n")
     env = dict(os.environ)
     env["AFC_CAL3_CODEX_LAUNCHER"] = launcher
+    env["AFC_CAL3_CODEX_ALIASES"] = "reviewer3p, helper3p"
     env.pop("AFC_CAL3_CODEX_EXE", None)
+    env.pop("AFC_CAL3_CODEX_NETWORK_ACCESS", None)
     try:
         run(
             "probe: codex launcher backend",
@@ -334,6 +388,9 @@ def test_probe_codex_launcher():
         codex = data["recipes"]["codex"]
         if codex.get("backend") != "launcher":
             raise AssertionError("expected launcher backend, got {}".format(codex.get("backend")))
+        capability = codex.get("capability") or {}
+        if capability.get("network_access") != "none":
+            raise AssertionError("launcher codex recipe should not advertise network by default")
         argv = codex["argv"]
         expected_prefix = [
             "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", launcher,
@@ -345,6 +402,10 @@ def test_probe_codex_launcher():
         probe = next((p for p in data["probes"] if p.get("tool") == "codex"), None)
         if not probe or probe.get("backend") != "launcher":
             raise AssertionError("codex probe should report launcher backend")
+        aliases = data.get("agent_recipes") or {}
+        for alias in ("codex3p", "reviewer3p", "helper3p"):
+            if aliases.get(alias) != "codex":
+                raise AssertionError("expected {} alias to map to codex, got {}".format(alias, aliases))
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -375,6 +436,7 @@ def test_probe_codex_launcher_missing_fails_closed():
     env = dict(os.environ)
     env["AFC_CAL3_CODEX_LAUNCHER"] = missing_launcher
     env["AFC_CAL3_CODEX_EXE"] = native_codex
+    env.pop("AFC_CAL3_CODEX_NETWORK_ACCESS", None)
     try:
         run(
             "probe: missing codex launcher fails closed",
@@ -388,6 +450,625 @@ def test_probe_codex_launcher_missing_fails_closed():
         probe = next((p for p in data["probes"] if p.get("tool") == "codex"), None)
         if not probe or probe.get("available") is not False or probe.get("backend") != "launcher":
             raise AssertionError("codex probe should report unavailable launcher backend")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_dispatch_timeout_kills_process_tree():
+    root, inbox = make_inbox("spawn-child-sleep", task_id="cal3-timeout-tree")
+    recipe_path = os.path.join(inbox, "invoke-recipes.json")
+    with open(recipe_path, "r", encoding="utf-8") as handle:
+        recipe = json.load(handle)
+    recipe["recipes"]["fake"]["argv"].extend(["--sleep", "30"])
+    write(recipe_path, json.dumps(recipe, indent=2))
+    try:
+        run(
+            "dispatch: timeout kills worker process tree",
+            [
+                sys.executable,
+                "-B",
+                DISPATCH,
+                "--inbox",
+                inbox,
+                "--task-id",
+                "cal3-timeout-tree",
+                "--watch-max-iterations",
+                "1",
+                "--poll-interval",
+                "0",
+                "--timeout-seconds",
+                "1",
+                "--json",
+            ],
+            expect_exit=1,
+            timeout=15,
+        )
+        status = read_status(inbox, "cal3-timeout-tree")
+        if status.get("state") != "TIMEOUT":
+            raise AssertionError("expected TIMEOUT, got {}".format(status))
+        termination = status.get("timeout_termination") or {}
+        if termination.get("attempted") is not True:
+            raise AssertionError("expected timeout termination attempt, got {}".format(status))
+        pid_path = os.path.join(root, "child.pid")
+        if not os.path.isfile(pid_path):
+            raise AssertionError("expected child pid file")
+        with open(pid_path, "r", encoding="utf-8") as handle:
+            child_pid = int(handle.read().strip())
+        if not wait_pid_exit(child_pid, timeout=8):
+            raise AssertionError("child process still running after timeout: {}".format(child_pid))
+
+        events = read_events(inbox)
+        timeout_event = next(
+            (
+                event for event in events
+                if event.get("event_type") == "TASK_ABORTED"
+                and event.get("abort_reason") == "timeout"
+            ),
+            None,
+        )
+        if not timeout_event or timeout_event.get("attempt") != 1:
+            raise AssertionError("timeout event missing attempt history: {}".format(events))
+
+        # Retry the same task successfully. The mutable status may advance to
+        # FINISHED, but append-only history must retain attempt 1's timeout.
+        with open(recipe_path, "r", encoding="utf-8") as handle:
+            retry_recipe = json.load(handle)
+        argv = retry_recipe["recipes"]["fake"]["argv"]
+        mode_index = argv.index("--mode") + 1
+        argv[mode_index] = "success"
+        retry_recipe["recipes"]["fake"]["argv"] = argv[:-2]
+        write(recipe_path, json.dumps(retry_recipe, indent=2))
+        run(
+            "dispatch: timeout retry succeeds with retained history",
+            [
+                sys.executable,
+                "-B",
+                DISPATCH,
+                "--inbox",
+                inbox,
+                "--task-id",
+                "cal3-timeout-tree",
+                "--watch-max-iterations",
+                "5",
+                "--poll-interval",
+                "0",
+                "--timeout-seconds",
+                "5",
+                "--max-attempts",
+                "2",
+                "--json",
+            ],
+        )
+        events = read_events(inbox)
+        attempts = [
+            event.get("attempt") for event in events
+            if event.get("event_type") == "TASK_STARTED"
+        ]
+        if attempts != [1, 2]:
+            raise AssertionError("expected retained attempts [1, 2], got {}".format(attempts))
+        if not any(
+            event.get("event_type") == "TASK_ABORTED"
+            and event.get("abort_reason") == "timeout"
+            and event.get("attempt") == 1
+            for event in events
+        ):
+            raise AssertionError("retry lost timeout history: {}".format(events))
+        assert_canonical_inbox_valid(inbox)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_dispatch_timeout_records_source_residue():
+    root, inbox = make_inbox("stray-source-sleep", task_id="cal3-timeout-source-residue")
+    recipe_path = os.path.join(inbox, "invoke-recipes.json")
+    with open(recipe_path, "r", encoding="utf-8") as handle:
+        recipe = json.load(handle)
+    recipe["recipes"]["fake"]["argv"].extend(["--sleep", "30"])
+    write(recipe_path, json.dumps(recipe, indent=2))
+    try:
+        run(
+            "dispatch: timeout records source residue",
+            [
+                sys.executable,
+                "-B",
+                DISPATCH,
+                "--inbox",
+                inbox,
+                "--task-id",
+                "cal3-timeout-source-residue",
+                "--permission-profile",
+                "cal3-readonly",
+                "--watch-max-iterations",
+                "1",
+                "--poll-interval",
+                "0",
+                "--timeout-seconds",
+                "1",
+                "--json",
+            ],
+            expect_exit=1,
+            timeout=15,
+        )
+        status = read_status(inbox, "cal3-timeout-source-residue")
+        if status.get("state") != "TIMEOUT":
+            raise AssertionError("expected TIMEOUT, got {}".format(status))
+        if "STRAY.md" not in status.get("source_violations", []):
+            raise AssertionError("expected timeout source residue, got {}".format(status))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_dispatch_timeout_records_commit_residue():
+    root, inbox = make_inbox("commit-source-sleep", task_id="cal3-timeout-commit-residue")
+    recipe_path = os.path.join(inbox, "invoke-recipes.json")
+    with open(recipe_path, "r", encoding="utf-8") as handle:
+        recipe = json.load(handle)
+    recipe["recipes"]["fake"]["argv"].extend(["--sleep", "30"])
+    write(recipe_path, json.dumps(recipe, indent=2))
+    try:
+        init_git_repo(root, "timeout commit residue")
+        run(
+            "dispatch: timeout records commit residue",
+            [
+                sys.executable,
+                "-B",
+                DISPATCH,
+                "--inbox",
+                inbox,
+                "--task-id",
+                "cal3-timeout-commit-residue",
+                "--watch-max-iterations",
+                "1",
+                "--poll-interval",
+                "0",
+                "--timeout-seconds",
+                "1",
+                "--json",
+            ],
+            expect_exit=1,
+            timeout=15,
+        )
+        status = read_status(inbox, "cal3-timeout-commit-residue")
+        if status.get("state") != "TIMEOUT":
+            raise AssertionError("expected TIMEOUT, got {}".format(status))
+        if not status.get("commit_violations"):
+            raise AssertionError("expected timeout commit residue, got {}".format(status))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def read_events(inbox):
+    events_path = os.path.join(inbox, "events.jsonl")
+    events = []
+    if not os.path.isfile(events_path):
+        return events
+    with open(events_path, "r", encoding="utf-8-sig") as handle:
+        for line in handle:
+            line = line.strip()
+            if line:
+                events.append(json.loads(line))
+    return events
+
+
+def assert_canonical_inbox_valid(inbox):
+    result = subprocess.run(
+        [sys.executable, "-B", VALIDATOR, "--active-only", inbox],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            "canonical inbox validation failed:\n{}\n{}".format(
+                result.stdout, result.stderr
+            )
+        )
+
+
+def test_cal3_event_metadata_validation():
+    global PASS
+    root, inbox = make_inbox("success", task_id="cal3-event-contract")
+    events_path = os.path.join(inbox, "events.jsonl")
+    base = {
+        "schema": "agent-file-coordination/event",
+        "schema_version": "0.1.0",
+        "event_id": "evt-cal3-event-contract-heartbeat",
+        "event_type": "WORKER_HEARTBEAT",
+        "task_id": "cal3-event-contract",
+        "created_at": "2026-07-11",
+        "summary": "heartbeat",
+    }
+    try:
+        write(events_path, json.dumps(base) + "\n")
+        result = subprocess.run(
+            [sys.executable, "-B", VALIDATOR, "--active-only", inbox],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0 or "positive integer attempt" not in result.stdout:
+            raise AssertionError("missing attempt unexpectedly validated: {}".format(result.stdout))
+
+        aborted = dict(base)
+        aborted.update({
+            "event_id": "evt-cal3-event-contract-aborted",
+            "event_type": "TASK_ABORTED",
+            "attempt": 1,
+            "worker_session_id": "pid:123",
+        })
+        write(events_path, json.dumps(aborted) + "\n")
+        result = subprocess.run(
+            [sys.executable, "-B", VALIDATOR, "--active-only", inbox],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0 or "abort_reason is required" not in result.stdout:
+            raise AssertionError("missing abort_reason unexpectedly validated: {}".format(result.stdout))
+        PASS += 1
+        print("  [PASS] CAL-3 event metadata validator rejects malformed variants")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_dispatch_heartbeat_is_liveness_not_completion():
+    root, inbox = make_inbox("stderr-sleep", task_id="cal3-heartbeat")
+    recipe_path = os.path.join(inbox, "invoke-recipes.json")
+    with open(recipe_path, "r", encoding="utf-8") as handle:
+        recipe = json.load(handle)
+    recipe["recipes"]["fake"]["argv"].extend(["--sleep", "1.2"])
+    write(recipe_path, json.dumps(recipe, indent=2))
+    try:
+        run(
+            "dispatch: heartbeat is liveness not completion",
+            [
+                sys.executable,
+                "-B",
+                DISPATCH,
+                "--inbox",
+                inbox,
+                "--task-id",
+                "cal3-heartbeat",
+                "--watch-max-iterations",
+                "1",
+                "--poll-interval",
+                "0",
+                "--timeout-seconds",
+                "5",
+                "--heartbeat-interval-seconds",
+                "0.2",
+                "--json",
+            ],
+            expect_exit=1,
+            timeout=10,
+        )
+        events = read_events(inbox)
+        if not any(event.get("event_type") == "WORKER_HEARTBEAT" for event in events):
+            raise AssertionError("expected WORKER_HEARTBEAT event")
+        status = read_status(inbox, "cal3-heartbeat")
+        if status.get("state") != "NO_REPORT":
+            raise AssertionError("heartbeat must not count as completion evidence: {}".format(status))
+        if not status.get("primary_log_path", "").endswith("stderr.log"):
+            raise AssertionError("expected stderr primary log, got {}".format(status))
+        if "worker trace on stderr" not in status.get("redacted_primary_log_tail", ""):
+            raise AssertionError("expected stderr primary tail, got {}".format(status))
+        if not os.path.isfile(os.path.join(inbox, "artifacts", "cal3", "cal3-heartbeat", "LOGS.md")):
+            raise AssertionError("expected CAL-3 log README")
+        heartbeat = next(
+            event for event in events if event.get("event_type") == "WORKER_HEARTBEAT"
+        )
+        if heartbeat.get("attempt") != 1 or not heartbeat.get("worker_session_id"):
+            raise AssertionError("heartbeat missing attempt/session identity: {}".format(heartbeat))
+        assert_canonical_inbox_valid(inbox)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_dispatch_no_progress_abort_kills_worker():
+    root, inbox = make_inbox("spawn-child-sleep", task_id="cal3-no-progress-abort")
+    recipe_path = os.path.join(inbox, "invoke-recipes.json")
+    with open(recipe_path, "r", encoding="utf-8") as handle:
+        recipe = json.load(handle)
+    recipe["recipes"]["fake"]["argv"].extend(["--sleep", "30"])
+    write(recipe_path, json.dumps(recipe, indent=2))
+    try:
+        run(
+            "dispatch: no-progress abort kills worker",
+            [
+                sys.executable,
+                "-B",
+                DISPATCH,
+                "--inbox",
+                inbox,
+                "--task-id",
+                "cal3-no-progress-abort",
+                "--watch-max-iterations",
+                "1",
+                "--poll-interval",
+                "0",
+                "--timeout-seconds",
+                "20",
+                "--abort-on-no-progress-seconds",
+                "0.5",
+                "--json",
+            ],
+            expect_exit=1,
+            timeout=15,
+        )
+        status = read_status(inbox, "cal3-no-progress-abort")
+        if status.get("state") != "ABORTED" or status.get("abort_reason") != "no_progress":
+            raise AssertionError("expected no_progress abort, got {}".format(status))
+        if not (status.get("abort_termination") or {}).get("attempted"):
+            raise AssertionError("expected abort termination details, got {}".format(status))
+        events = read_events(inbox)
+        aborted = next(
+            (event for event in events if event.get("event_type") == "TASK_ABORTED"),
+            None,
+        )
+        if not aborted:
+            raise AssertionError("expected TASK_ABORTED event")
+        if aborted.get("attempt") != 1 or not aborted.get("worker_session_id"):
+            raise AssertionError("abort missing attempt/session identity: {}".format(aborted))
+        assert_canonical_inbox_valid(inbox)
+        pid_path = os.path.join(root, "child.pid")
+        if os.path.isfile(pid_path):
+            with open(pid_path, "r", encoding="utf-8") as handle:
+                child_pid = int(handle.read().strip())
+            if not wait_pid_exit(child_pid, timeout=8):
+                raise AssertionError("child process still running after no-progress abort: {}".format(child_pid))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_dispatch_no_progress_abort_records_source_residue():
+    root, inbox = make_inbox("stray-source-sleep", task_id="cal3-abort-source-residue")
+    recipe_path = os.path.join(inbox, "invoke-recipes.json")
+    with open(recipe_path, "r", encoding="utf-8") as handle:
+        recipe = json.load(handle)
+    recipe["recipes"]["fake"]["argv"].extend(["--sleep", "30"])
+    write(recipe_path, json.dumps(recipe, indent=2))
+    try:
+        run(
+            "dispatch: aborted readonly worker records source residue",
+            [
+                sys.executable,
+                "-B",
+                DISPATCH,
+                "--inbox",
+                inbox,
+                "--task-id",
+                "cal3-abort-source-residue",
+                "--permission-profile",
+                "cal3-readonly",
+                "--watch-max-iterations",
+                "1",
+                "--poll-interval",
+                "0",
+                "--timeout-seconds",
+                "20",
+                "--abort-on-no-progress-seconds",
+                "0.5",
+                "--json",
+            ],
+            expect_exit=1,
+            timeout=15,
+        )
+        status = read_status(inbox, "cal3-abort-source-residue")
+        if status.get("state") != "ABORTED" or status.get("abort_reason") != "no_progress":
+            raise AssertionError("expected no_progress abort, got {}".format(status))
+        if "STRAY.md" not in status.get("source_violations", []):
+            raise AssertionError("expected aborted source residue, got {}".format(status))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_dispatch_no_progress_abort_records_commit_residue():
+    root, inbox = make_inbox("commit-source-sleep", task_id="cal3-abort-commit-residue")
+    recipe_path = os.path.join(inbox, "invoke-recipes.json")
+    with open(recipe_path, "r", encoding="utf-8") as handle:
+        recipe = json.load(handle)
+    recipe["recipes"]["fake"]["argv"].extend(["--sleep", "30"])
+    write(recipe_path, json.dumps(recipe, indent=2))
+    try:
+        init_git_repo(root, "abort commit residue")
+        run(
+            "dispatch: aborted worker records commit residue",
+            [
+                sys.executable,
+                "-B",
+                DISPATCH,
+                "--inbox",
+                inbox,
+                "--task-id",
+                "cal3-abort-commit-residue",
+                "--watch-max-iterations",
+                "1",
+                "--poll-interval",
+                "0",
+                "--timeout-seconds",
+                "20",
+                "--abort-on-no-progress-seconds",
+                "0.5",
+                "--json",
+            ],
+            expect_exit=1,
+            timeout=15,
+        )
+        status = read_status(inbox, "cal3-abort-commit-residue")
+        if status.get("state") != "ABORTED" or status.get("abort_reason") != "no_progress":
+            raise AssertionError("expected no_progress abort, got {}".format(status))
+        if not status.get("commit_violations"):
+            raise AssertionError("expected aborted commit residue, got {}".format(status))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_dispatch_no_progress_abort_promotes_approval_required():
+    root, inbox = make_inbox("approval-sleep", task_id="cal3-abort-approval-required")
+    recipe_path = os.path.join(inbox, "invoke-recipes.json")
+    with open(recipe_path, "r", encoding="utf-8") as handle:
+        recipe = json.load(handle)
+    recipe["recipes"]["fake"]["argv"].extend(["--sleep", "30"])
+    write(recipe_path, json.dumps(recipe, indent=2))
+    try:
+        run(
+            "dispatch: aborted approval prompt requires manual action",
+            [
+                sys.executable,
+                "-B",
+                DISPATCH,
+                "--inbox",
+                inbox,
+                "--task-id",
+                "cal3-abort-approval-required",
+                "--watch-max-iterations",
+                "1",
+                "--poll-interval",
+                "0",
+                "--timeout-seconds",
+                "20",
+                "--abort-on-no-progress-seconds",
+                "0.5",
+                "--json",
+            ],
+            expect_exit=2,
+            timeout=15,
+        )
+        status = read_status(inbox, "cal3-abort-approval-required")
+        if status.get("state") != "APPROVAL_REQUIRED":
+            raise AssertionError("expected approval promotion, got {}".format(status))
+        if status.get("abort_reason") != "no_progress":
+            raise AssertionError("expected retained abort metadata, got {}".format(status))
+        if "APPROVAL REQUIRED" not in status.get("redacted_primary_log_tail", ""):
+            raise AssertionError("expected approval evidence tail, got {}".format(status))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_dispatch_no_progress_does_not_abort_completed_worker():
+    root, inbox = make_inbox("delayed-success", task_id="cal3-no-progress-race-success")
+    recipe_path = os.path.join(inbox, "invoke-recipes.json")
+    with open(recipe_path, "r", encoding="utf-8") as handle:
+        recipe = json.load(handle)
+    recipe["recipes"]["fake"]["argv"].extend(["--sleep", "0.45"])
+    write(recipe_path, json.dumps(recipe, indent=2))
+    try:
+        run(
+            "dispatch: no-progress does not abort completed worker",
+            [
+                sys.executable,
+                "-B",
+                DISPATCH,
+                "--inbox",
+                inbox,
+                "--task-id",
+                "cal3-no-progress-race-success",
+                "--watch-max-iterations",
+                "1",
+                "--poll-interval",
+                "0",
+                "--timeout-seconds",
+                "5",
+                "--abort-on-no-progress-seconds",
+                "0.5",
+                "--json",
+            ],
+            timeout=10,
+        )
+        status = read_status(inbox, "cal3-no-progress-race-success")
+        if status.get("state") != "FINISHED":
+            raise AssertionError("completed worker should not be aborted: {}".format(status))
+        report_validation = status.get("report_validation") or {}
+        if report_validation.get("result") != "pass":
+            raise AssertionError("expected valid report, got {}".format(status))
+        if status.get("abort_reason"):
+            raise AssertionError("unexpected abort fields on completed worker: {}".format(status))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_dispatch_repeated_failure_abort():
+    root, inbox = make_inbox("http-failures", task_id="cal3-repeated-failure-abort")
+    recipe_path = os.path.join(inbox, "invoke-recipes.json")
+    with open(recipe_path, "r", encoding="utf-8") as handle:
+        recipe = json.load(handle)
+    recipe["recipes"]["fake"]["argv"].extend(["--sleep", "1.5"])
+    write(recipe_path, json.dumps(recipe, indent=2))
+    try:
+        run(
+            "dispatch: repeated HTTP failures abort worker",
+            [
+                sys.executable,
+                "-B",
+                DISPATCH,
+                "--inbox",
+                inbox,
+                "--task-id",
+                "cal3-repeated-failure-abort",
+                "--watch-max-iterations",
+                "1",
+                "--poll-interval",
+                "0",
+                "--timeout-seconds",
+                "10",
+                "--abort-on-repeated-failures",
+                "2",
+                "--json",
+            ],
+            expect_exit=1,
+            timeout=10,
+        )
+        status = read_status(inbox, "cal3-repeated-failure-abort")
+        if status.get("state") != "ABORTED" or status.get("abort_reason") != "repeated_failures":
+            raise AssertionError("expected repeated_failures abort, got {}".format(status))
+        if "404" not in status.get("abort_evidence_tail", ""):
+            raise AssertionError("expected failure evidence tail, got {}".format(status))
+        events = read_events(inbox)
+        aborted = [event for event in events if event.get("event_type") == "TASK_ABORTED"]
+        if not aborted or aborted[-1].get("abort_reason") != "repeated_failures":
+            raise AssertionError("expected repeated failure TASK_ABORTED event, got {}".format(events))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_dispatch_repeated_failure_abort_from_stdout():
+    root, inbox = make_inbox("http-failures-stdout", task_id="cal3-repeated-failure-stdout")
+    recipe_path = os.path.join(inbox, "invoke-recipes.json")
+    with open(recipe_path, "r", encoding="utf-8") as handle:
+        recipe = json.load(handle)
+    recipe["recipes"]["fake"]["argv"].extend(["--sleep", "1.5"])
+    write(recipe_path, json.dumps(recipe, indent=2))
+    try:
+        run(
+            "dispatch: repeated HTTP failures on stdout abort worker",
+            [
+                sys.executable,
+                "-B",
+                DISPATCH,
+                "--inbox",
+                inbox,
+                "--task-id",
+                "cal3-repeated-failure-stdout",
+                "--watch-max-iterations",
+                "1",
+                "--poll-interval",
+                "0",
+                "--timeout-seconds",
+                "10",
+                "--abort-on-repeated-failures",
+                "2",
+                "--json",
+            ],
+            expect_exit=1,
+            timeout=10,
+        )
+        status = read_status(inbox, "cal3-repeated-failure-stdout")
+        if status.get("state") != "ABORTED" or status.get("abort_reason") != "repeated_failures":
+            raise AssertionError("expected repeated_failures abort, got {}".format(status))
+        if "stdout:" not in status.get("abort_evidence_tail", ""):
+            raise AssertionError("expected stdout evidence section, got {}".format(status))
+        if "404" not in status.get("abort_evidence_tail", ""):
+            raise AssertionError("expected stdout failure evidence, got {}".format(status))
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -424,6 +1105,37 @@ def test_dispatch_success():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_dispatch_missing_probe_blocks_automatic_dispatch():
+    root, inbox = make_inbox("success", task_id="cal3-missing-probe")
+    recipe_path = os.path.join(inbox, "invoke-recipes.json")
+    with open(recipe_path, "r", encoding="utf-8") as handle:
+        recipe = json.load(handle)
+    recipe.pop("probes", None)
+    write(recipe_path, json.dumps(recipe, indent=2))
+    try:
+        result = run(
+            "dispatch: missing CAL-3 probe blocks automatic dispatch",
+            [
+                sys.executable,
+                "-B",
+                DISPATCH,
+                "--inbox",
+                inbox,
+                "--task-id",
+                "cal3-missing-probe",
+                "--dry-run",
+                "--json",
+            ],
+            expect_exit=2,
+        )
+        if "ROSTER_BLOCKED" not in result.stderr or "CAL-3 requires" not in result.stderr:
+            raise AssertionError("expected CAL-3 roster block, got {}".format(result.stderr[:400]))
+        if os.path.isdir(os.path.join(inbox, "artifacts", "cal3", "cal3-missing-probe")):
+            raise AssertionError("worker artifacts should not be created when probe is missing")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_dispatch_report_path_outside_workspace():
     root = tempfile.mkdtemp(prefix="afc-cal3-outside-")
     workspace = os.path.join(root, "workspace")
@@ -439,6 +1151,7 @@ def test_dispatch_report_path_outside_workspace():
         "schema_version": "0.1.0",
         "default_permission_profile": "cal3-bounded-edit",
         "agent_recipes": {"FakeWorker": "fake"},
+        "probes": [{"tool": "codex", "available": True, "backend": "fixture"}],
         "recipes": {
             "fake": {
                 "tool": "codex",
@@ -461,6 +1174,7 @@ def test_dispatch_report_path_outside_workspace():
         },
     }
     write(os.path.join(inbox, "invoke-recipes.json"), json.dumps(recipe, indent=2))
+    write_cal3_roster(inbox)
     try:
         result = run(
             "dispatch: report path outside workspace fails fast",
@@ -533,6 +1247,69 @@ def read_status(inbox, task_id):
     status_path = os.path.join(inbox, "artifacts", "cal3", task_id, "status.json")
     with open(status_path, "r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def update_fake_capability(inbox, **capability):
+    recipe_path = os.path.join(inbox, "invoke-recipes.json")
+    with open(recipe_path, "r", encoding="utf-8") as handle:
+        recipe = json.load(handle)
+    recipe["recipes"]["fake"]["capability"].update(capability)
+    write(recipe_path, json.dumps(recipe, indent=2))
+
+
+def pid_running(pid):
+    if os.name == "nt":
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", "PID eq {}".format(pid), "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return str(pid) in (result.stdout or "")
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    proc_stat = "/proc/{}/stat".format(pid)
+    if os.path.isfile(proc_stat):
+        try:
+            with open(proc_stat, "r", encoding="utf-8", errors="replace") as handle:
+                parts = handle.read().split()
+            if len(parts) > 2 and parts[2] == "Z":
+                return False
+        except OSError:
+            return False
+    else:
+        try:
+            result = subprocess.run(
+                ["ps", "-o", "stat=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            result = None
+        if result is not None and result.returncode == 0:
+            stat = (result.stdout or "").strip()
+            if stat.startswith("Z"):
+                return False
+    return True
+
+
+def wait_pid_exit(pid, timeout=5):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not pid_running(pid):
+            return True
+        time.sleep(0.1)
+    return not pid_running(pid)
 
 
 def test_dispatch_readonly_report_only_passes():
@@ -771,6 +1548,113 @@ def test_dispatch_guardrail_yes_is_invalid():
             raise AssertionError("expected permission_scope_expanded rejection, got {}".format(direct))
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_dispatch_report_agent_name_mismatch_is_invalid():
+    # A report whose agent_name disagrees with its task must be rejected at
+    # dispatch intake (INVALID_REPORT), not deferred to the intake stage.
+    # This exercises the task= cross-check added to validate_expected_report;
+    # the report is otherwise schema-valid, so only the agent_name mismatch
+    # can fail it.
+    root, inbox = make_inbox("wrong-agent", task_id="cal3-wrong-agent")
+    try:
+        run(
+            "dispatch: report agent_name mismatch is invalid at dispatch",
+            [
+                sys.executable,
+                "-B",
+                DISPATCH,
+                "--inbox",
+                inbox,
+                "--task-id",
+                "cal3-wrong-agent",
+                "--watch-max-iterations",
+                "5",
+                "--poll-interval",
+                "0",
+                "--timeout-seconds",
+                "3",
+                "--json",
+            ],
+            expect_exit=1,
+        )
+        status = read_status(inbox, "cal3-wrong-agent")
+        if status.get("state") != "INVALID_REPORT":
+            raise AssertionError("expected INVALID_REPORT, got {}".format(status))
+        direct = status.get("report_validation") or {}
+        if "agent_name" not in str(direct.get("reason", "")):
+            raise AssertionError("expected agent_name mismatch rejection, got {}".format(direct))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_dispatch_readonly_changed_files_is_invalid():
+    # Default task is modify_source=no (read-only). A report that lists real
+    # changed_files must be rejected at dispatch via the modify_source
+    # cross-check. This needs the flat dispatch task's permission_scope.*
+    # dotted keys nested for validate_report_schema to see them.
+    root, inbox = make_inbox("changed-files", task_id="cal3-changed-files")
+    try:
+        run(
+            "dispatch: read-only task + changed_files is invalid at dispatch",
+            [
+                sys.executable,
+                "-B",
+                DISPATCH,
+                "--inbox",
+                inbox,
+                "--task-id",
+                "cal3-changed-files",
+                "--watch-max-iterations",
+                "5",
+                "--poll-interval",
+                "0",
+                "--timeout-seconds",
+                "3",
+                "--json",
+            ],
+            expect_exit=1,
+        )
+        status = read_status(inbox, "cal3-changed-files")
+        if status.get("state") != "INVALID_REPORT":
+            raise AssertionError("expected INVALID_REPORT, got {}".format(status))
+        direct = status.get("report_validation") or {}
+        reason = str(direct.get("reason", ""))
+        if "modify_source" not in reason and "changed_files" not in reason:
+            raise AssertionError("expected modify_source/changed_files rejection, got {}".format(direct))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_prompt_includes_coordination_metadata():
+    global PASS
+    # A task carrying coordination_mode / comparison_group must surface them
+    # in the worker prompt's report template; otherwise a hand-writing worker
+    # would omit them and trip the dispatch-time task cross-check on
+    # coordinated CAL-3 tasks.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "afc_cal3_dispatch_prompt", os.path.join(ROOT, "scripts", "afc-cal3-dispatch.py")
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    p_with = mod.prompt_for_task(
+        {"task_id": "t1", "agent_name": "FakeWorker",
+         "coordination_mode": "delegate_full", "comparison_group": "group-1"},
+        "/ws", "/ws/task.md", "/ws/report.md",
+    )
+    if "coordination_mode: delegate_full" not in p_with or "comparison_group: group-1" not in p_with:
+        raise AssertionError("prompt omitted coordination metadata:\n{}".format(p_with))
+
+    p_without = mod.prompt_for_task(
+        {"task_id": "t1", "agent_name": "FakeWorker"},
+        "/ws", "/ws/task.md", "/ws/report.md",
+    )
+    if "coordination_mode" in p_without or "comparison_group" in p_without:
+        raise AssertionError("prompt mentioned coordination metadata when task has none:\n{}".format(p_without))
+    PASS += 1
+    print("  [PASS] prompt includes coordination metadata only when task carries it")
 
 
 def test_dispatch_dry_run_does_not_write_events():
@@ -1113,6 +1997,262 @@ def test_dispatch_local_autonomous_high_blocks_network():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_dispatch_network_readonly_allows_network_readonly_task():
+    root, inbox = make_inbox("success", task_id="cal3-network-readonly-task")
+    task_path = os.path.join(inbox, "task-FakeWorker-cal3-network-readonly-task.md")
+    write(
+        task_path,
+        task_text(
+            root,
+            task_id="cal3-network-readonly-task",
+            modify="no",
+            run_commands="read_only",
+            network_access="allowed",
+        ),
+    )
+    update_fake_capability(inbox, network_access="allowed")
+    try:
+        run(
+            "dispatch: network readonly profile allows readonly network task",
+            [
+                sys.executable,
+                "-B",
+                DISPATCH,
+                "--inbox",
+                inbox,
+                "--task-id",
+                "cal3-network-readonly-task",
+                "--permission-profile",
+                "cal3-network-readonly",
+                "--watch-max-iterations",
+                "1",
+                "--poll-interval",
+                "0",
+                "--timeout-seconds",
+                "3",
+                "--json",
+            ],
+        )
+        status = read_status(inbox, "cal3-network-readonly-task")
+        if status.get("state") != "FINISHED":
+            raise AssertionError("expected FINISHED, got {}".format(status))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_dispatch_network_profile_respects_cli_capability():
+    root, inbox = make_inbox("success", task_id="cal3-network-capability-block")
+    task_path = os.path.join(inbox, "task-FakeWorker-cal3-network-capability-block.md")
+    write(
+        task_path,
+        task_text(
+            root,
+            task_id="cal3-network-capability-block",
+            modify="no",
+            run_commands="read_only",
+            network_access="allowed",
+        ),
+    )
+    try:
+        result = run(
+            "dispatch: network profile respects CLI capability ceiling",
+            [
+                sys.executable,
+                "-B",
+                DISPATCH,
+                "--inbox",
+                inbox,
+                "--task-id",
+                "cal3-network-capability-block",
+                "--permission-profile",
+                "cal3-network-readonly",
+                "--json",
+            ],
+            expect_exit=1,
+        )
+        if "network_access allowed exceeds CAL-3 profile limit none" not in result.stderr:
+            raise AssertionError("expected network capability rejection, got {}".format(result.stderr))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_dispatch_network_work_allows_network_edit_task():
+    root, inbox = make_inbox("success", task_id="cal3-network-work-task")
+    task_path = os.path.join(inbox, "task-FakeWorker-cal3-network-work-task.md")
+    write(
+        task_path,
+        task_text(
+            root,
+            task_id="cal3-network-work-task",
+            modify="yes",
+            run_commands="bounded",
+            network_access="allowed",
+        ),
+    )
+    update_fake_capability(inbox, network_access="allowed")
+    try:
+        run(
+            "dispatch: network work profile allows network edit task",
+            [
+                sys.executable,
+                "-B",
+                DISPATCH,
+                "--inbox",
+                inbox,
+                "--task-id",
+                "cal3-network-work-task",
+                "--permission-profile",
+                "cal3-network-work",
+                "--watch-max-iterations",
+                "1",
+                "--poll-interval",
+                "0",
+                "--timeout-seconds",
+                "3",
+                "--json",
+            ],
+        )
+        status = read_status(inbox, "cal3-network-work-task")
+        if status.get("state") != "FINISHED":
+            raise AssertionError("expected FINISHED, got {}".format(status))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_dispatch_approved_commit_profile_allows_worker_commit():
+    root, inbox = make_inbox("commit-source", task_id="cal3-approved-commit-task")
+    task_path = os.path.join(inbox, "task-FakeWorker-cal3-approved-commit-task.md")
+    write(
+        task_path,
+        task_text(
+            root,
+            task_id="cal3-approved-commit-task",
+            modify="yes",
+            run_commands="bounded",
+            network_access="allowed",
+            commit_push="approved",
+        ),
+    )
+    update_fake_capability(inbox, network_access="allowed", commit_push="approved")
+    try:
+        init_git_repo(root, "dispatch approved commit")
+        run(
+            "dispatch: approved commit profile allows worker commit",
+            [
+                sys.executable,
+                "-B",
+                DISPATCH,
+                "--inbox",
+                inbox,
+                "--task-id",
+                "cal3-approved-commit-task",
+                "--permission-profile",
+                "cal3-approved-commit",
+                "--watch-max-iterations",
+                "1",
+                "--poll-interval",
+                "0",
+                "--timeout-seconds",
+                "5",
+                "--json",
+            ],
+        )
+        status = read_status(inbox, "cal3-approved-commit-task")
+        if status.get("state") != "FINISHED":
+            raise AssertionError("expected FINISHED, got {}".format(status))
+        if status.get("commit_violations"):
+            raise AssertionError("approved commit profile should not record commit violations")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_dispatch_commit_approved_fails_under_non_commit_profile():
+    root, inbox = make_inbox("success", task_id="cal3-commit-approved-block")
+    task_path = os.path.join(inbox, "task-FakeWorker-cal3-commit-approved-block.md")
+    write(
+        task_path,
+        task_text(
+            root,
+            task_id="cal3-commit-approved-block",
+            modify="yes",
+            run_commands="bounded",
+            network_access="allowed",
+            commit_push="approved",
+        ),
+    )
+    update_fake_capability(inbox, network_access="allowed", commit_push="approved")
+    try:
+        result = run(
+            "dispatch: commit approved fails under non-commit profile",
+            [
+                sys.executable,
+                "-B",
+                DISPATCH,
+                "--inbox",
+                inbox,
+                "--task-id",
+                "cal3-commit-approved-block",
+                "--permission-profile",
+                "cal3-network-work",
+                "--json",
+            ],
+            expect_exit=1,
+        )
+        if "commit_push approved exceeds CAL-3 profile limit no" not in result.stderr:
+            raise AssertionError("expected commit_push profile rejection, got {}".format(result.stderr))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_dispatch_destructive_actions_rejected_for_all_profiles():
+    profiles = [
+        "cal3-readonly",
+        "cal3-bounded-edit",
+        "cal3-local-autonomous",
+        "cal3-local-autonomous-high",
+        "cal3-network-readonly",
+        "cal3-network-work",
+        "cal3-approved-commit",
+        "cal3-release-gated",
+    ]
+    for profile in profiles:
+        root, inbox = make_inbox("success", task_id="cal3-destructive-{}".format(profile))
+        task_path = os.path.join(inbox, "task-FakeWorker-cal3-destructive-{}.md".format(profile))
+        write(
+            task_path,
+            task_text(
+                root,
+                task_id="cal3-destructive-{}".format(profile),
+                modify="yes",
+                run_commands="bounded",
+                network_access="none",
+                commit_push="no",
+                destructive_actions="yes",
+            ),
+        )
+        try:
+            result = run(
+                "dispatch: destructive actions rejected for {}".format(profile),
+                [
+                    sys.executable,
+                    "-B",
+                    DISPATCH,
+                    "--inbox",
+                    inbox,
+                    "--task-id",
+                    "cal3-destructive-{}".format(profile),
+                    "--permission-profile",
+                    profile,
+                    "--json",
+                ],
+                expect_exit=1,
+            )
+            if "destructive_actions must remain disabled for CAL-3" not in result.stderr:
+                raise AssertionError("expected destructive rejection, got {}".format(result.stderr))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
 def test_dispatch_cli_capability_blocks_write():
     root, inbox = make_inbox("success", task_id="cal3-capability-block")
     task_path = os.path.join(inbox, "task-FakeWorker-cal3-capability-block.md")
@@ -1451,7 +2591,20 @@ def main():
     test_probe_codex_readonly_writes_report()
     test_probe_codex_launcher()
     test_probe_codex_launcher_missing_fails_closed()
+    test_dispatch_timeout_kills_process_tree()
+    test_dispatch_timeout_records_source_residue()
+    test_dispatch_timeout_records_commit_residue()
+    test_cal3_event_metadata_validation()
+    test_dispatch_heartbeat_is_liveness_not_completion()
+    test_dispatch_no_progress_abort_kills_worker()
+    test_dispatch_no_progress_abort_records_source_residue()
+    test_dispatch_no_progress_abort_records_commit_residue()
+    test_dispatch_no_progress_abort_promotes_approval_required()
+    test_dispatch_no_progress_does_not_abort_completed_worker()
+    test_dispatch_repeated_failure_abort()
+    test_dispatch_repeated_failure_abort_from_stdout()
     test_dispatch_success()
+    test_dispatch_missing_probe_blocks_automatic_dispatch()
     test_dispatch_report_path_outside_workspace()
     test_dispatch_process_exit_validates_report_before_watcher()
     test_dispatch_readonly_report_only_passes()
@@ -1461,6 +2614,9 @@ def main():
     test_dispatch_commit_violation()
     test_dispatch_invalid_report_state()
     test_dispatch_guardrail_yes_is_invalid()
+    test_dispatch_report_agent_name_mismatch_is_invalid()
+    test_dispatch_readonly_changed_files_is_invalid()
+    test_prompt_includes_coordination_metadata()
     test_dispatch_dry_run_does_not_write_events()
     test_dispatch_dry_run_records_env_keys_only()
     test_dispatch_status_labels_worktree_as_cwd()
@@ -1471,6 +2627,12 @@ def main():
     test_dispatch_permission_profile_blocks_write()
     test_dispatch_local_autonomous_high_allows_bounded_local_work()
     test_dispatch_local_autonomous_high_blocks_network()
+    test_dispatch_network_readonly_allows_network_readonly_task()
+    test_dispatch_network_profile_respects_cli_capability()
+    test_dispatch_network_work_allows_network_edit_task()
+    test_dispatch_approved_commit_profile_allows_worker_commit()
+    test_dispatch_commit_approved_fails_under_non_commit_profile()
+    test_dispatch_destructive_actions_rejected_for_all_profiles()
     test_dispatch_cli_capability_blocks_write()
     test_dispatch_whole_workspace_lock_overlaps()
     test_dispatch_rework_fuse()

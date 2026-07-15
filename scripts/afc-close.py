@@ -1,21 +1,15 @@
 #!/usr/bin/env python3
 """Close one task by moving its active task/report files into archive."""
 
+import json
 import os
 import sys
 from datetime import date
 
 from afc_event import add_event_context, append_event_once
 from afc_frontmatter import parse_frontmatter_flat
-
-
-CLOSED_STATUSES = {
-    "CLOSED_GO",
-    "CLOSED_PARTIAL",
-    "CLOSED_RED",
-    "CANCELLED",
-    "SUPERSEDED",
-}
+from afc_constants import CLOSED_STATUSES
+from afc_fsutil import atomic_write
 
 
 def parse_frontmatter(filepath):
@@ -74,6 +68,32 @@ def move_files_transactionally(destinations):
                 "{}; rollback also failed: {}".format(exc, "; ".join(rollback_errors))
             ) from exc
         raise
+
+
+def event_exists(events_path, event_id):
+    if not os.path.isfile(events_path):
+        return False
+    try:
+        with open(events_path, "r", encoding="utf-8-sig") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                if record.get("event_id") == event_id:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def rollback_closed_files(destinations, archived_task_path, original_task_content):
+    """Restore the active task/report set after a post-move failure."""
+    if not atomic_write(archived_task_path, original_task_content):
+        raise OSError("failed to restore original task content before rollback")
+    move_files_transactionally(
+        [(dest, src) for src, dest in reversed(destinations)]
+    )
 
 
 def scan_task_and_reports(inbox_dir, task_id):
@@ -225,8 +245,27 @@ def main():
     try:
         append_event_once(events_path, add_event_context(event, task["data"], "closure"))
     except OSError as exc:
-        print("error: failed to append TASK_CLOSED event: {}".format(exc), file=sys.stderr)
-        return 1
+        # If the append completed before an error surfaced, keep the completed
+        # close. Otherwise restore the original active files so the command can
+        # be retried normally instead of leaving an eventless archive.
+        if not event_exists(events_path, event["event_id"]):
+            try:
+                rollback_closed_files(
+                    destinations, archived_task_path, task["content"]
+                )
+            except OSError as rollback_exc:
+                print(
+                    "error: failed to append TASK_CLOSED event: {}; rollback failed: {}".format(
+                        exc, rollback_exc
+                    ),
+                    file=sys.stderr,
+                )
+                return 1
+            print(
+                "error: failed to append TASK_CLOSED event: {}; close rolled back".format(exc),
+                file=sys.stderr,
+            )
+            return 1
 
     print("Closed {} as {}".format(task_id, status))
     print("Moved {} file(s) to {}".format(len(files), archive_dir))

@@ -33,18 +33,15 @@ from afc_event import (
 )
 from afc_frontmatter import parse_frontmatter_flat
 from afc_fsutil import atomic_write
+from afc_constants import (
+    CLOSED_STATUSES,
+    REPORT_BUDGET_BYTES,
+    REVIEW_REPORT_BUDGET_BYTES,
+    TASK_BUDGET_BYTES,
+)
 
 # I3 hygiene hint constants
 ACTIVE_INBOX_HINT_LIMIT_BYTES = 100 * 1024
-TASK_BUDGET_BYTES = 4 * 1024
-REPORT_BUDGET_BYTES = 3 * 1024
-REVIEW_REPORT_BUDGET_BYTES = 5 * 1024
-CLOSED_GO = "CLOSED_GO"
-CLOSED_PARTIAL = "CLOSED_PARTIAL"
-CLOSED_RED = "CLOSED_RED"
-CANCELLED = "CANCELLED"
-SUPERSEDED = "SUPERSEDED"
-CLOSED_STATUSES = (CLOSED_GO, CLOSED_PARTIAL, CLOSED_RED, CANCELLED, SUPERSEDED)
 
 # Stale undispatched hint threshold (days)
 STALE_UNDISPATCHED_DAYS = 1

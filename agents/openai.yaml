@@ -1,6 +1,6 @@
 interface:
   display_name: "Delegator"
-  short_description: "Coordinate multiple coding agents through task files, reports, worktree boundaries, and evidence-based verdicts."
-  description: "Delegator helps a coordinator assign bounded work to multiple coding agents, collect structured reports, and make final GO/PARTIAL/RED decisions from evidence."
+  short_description: "Coordinate external coding agents through bounded task files, reports, and evidence-based verdicts."
+  description: "Delegator routes work to external agents through files or verified CLI processes. While Delegator is active, it never uses built-in or current-session subagents for exploration, review, implementation, or fallback."
   icon: "🧭"
   accent_color: "#4F46E5"

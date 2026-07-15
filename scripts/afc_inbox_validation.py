@@ -97,6 +97,8 @@ EVENT_TYPES = {
     'TASK_ASSIGNED',
     'TASK_DISPATCHED',
     'TASK_STARTED',
+    'WORKER_HEARTBEAT',
+    'TASK_ABORTED',
     'REPORT_RECEIVED',
     'REPORT_REJECTED',
     'STATUS_UPDATED',
@@ -113,6 +115,8 @@ TASK_EVENT_TYPES = {
     'TASK_ASSIGNED',
     'TASK_DISPATCHED',
     'TASK_STARTED',
+    'WORKER_HEARTBEAT',
+    'TASK_ABORTED',
     'REPORT_RECEIVED',
     'COORDINATOR_VERDICT',
     'TASK_CLOSED',
@@ -626,6 +630,25 @@ def validate_event_record(record, line_num, errs):
 
     if event_type in TASK_EVENT_TYPES and empty_cell(record.get('task_id')):
         errs.append(f"Line {line_num}: task_id is required for {event_type}")
+
+    cal3_attempt_event = (
+        event_type in {'WORKER_HEARTBEAT', 'TASK_ABORTED'}
+        or (
+            event_type == 'TASK_STARTED'
+            and (
+                'cal3_permission_profile' in record
+                or 'invoke_recipe' in record
+            )
+        )
+    )
+    if cal3_attempt_event:
+        attempt = record.get('attempt')
+        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+            errs.append(f"Line {line_num}: positive integer attempt is required for {event_type}")
+        if empty_cell(record.get('worker_session_id')):
+            errs.append(f"Line {line_num}: worker_session_id is required for {event_type}")
+    if event_type == 'TASK_ABORTED' and empty_cell(record.get('abort_reason')):
+        errs.append(f"Line {line_num}: abort_reason is required for TASK_ABORTED")
 
     occurred_at = str(record.get('occurred_at', '') or '').strip()
     if occurred_at:

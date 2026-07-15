@@ -53,6 +53,39 @@ def write(path, content):
         handle.write(content)
 
 
+def write_usable_roster(inbox, agent="Implementer"):
+    rows = [
+        (
+            "| {agent} | implementer | external-chat | user-relay-model "
+            "| user-relay:{agent} | task-only | no | yes | tests_only | yes "
+            "| no | manual_needed | fixture work | none | external user-relay worker |"
+        ).format(agent=agent)
+    ]
+    text = """---
+schema: agent-file-coordination/roster
+schema_version: 0.1.0
+---
+# Agent Roster
+
+<!-- SESSION PREFERENCES
+Default CAL: CAL-1
+Execution preference: fixture external user-relay
+Available resources: external user-relay workers
+Available now: {agents}
+Model preference order: fixture model
+Avoid / unavailable: none
+Smoke tests: fixture
+Confirmed: 2026-06-29
+Change policy: fixture
+-->
+
+| Agent Name | Role | Tool | Model | Provider / Access Path | Protocol Mode | Coordinator Authority | Can Edit | Can Run Commands | Can Write Reports | Browser / Visual | Worktree Capability | Best Use | Avoid | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+{rows}
+""".format(agents=", ".join([agent]), rows="\n".join(rows))
+    write(os.path.join(inbox, "AGENT_ROSTER.md"), text)
+
+
 def route(**overrides):
     values = {
         "estimated_direct_minutes": 10,
@@ -294,9 +327,11 @@ def test_route_truth_table():
 
 
 def test_lite_handoff(tmp):
+    inbox = os.path.join(tmp, ".agent-inbox")
+    write_usable_roster(inbox, "DocsWorker")
     before = set(os.listdir(tmp))
     result = run(
-        "lite: valid no-inbox handoff",
+        "lite: valid rostered handoff",
         [
             sys.executable, "-B", LITE,
             "--agent", "DocsWorker",
@@ -407,6 +442,7 @@ def test_assignment_report_and_intake(tmp):
     inbox = os.path.join(project, ".agent-inbox")
     os.makedirs(inbox, exist_ok=True)
     init_repo(project)
+    write_usable_roster(inbox)
 
     no_route = os.path.join(tmp, "no-route.yaml")
     write(no_route, make_spec(project, inbox, route_fields=False))
@@ -516,6 +552,7 @@ def test_assignment_report_and_intake(tmp):
     spaced_worktree_spec = os.path.join(tmp, "spaced-worktree.yaml")
     spaced_worktree_inbox = os.path.join(tmp, "spaced-worktree-inbox")
     os.makedirs(spaced_worktree_inbox)
+    write_usable_roster(spaced_worktree_inbox)
     spaced_worktree = os.path.join(tmp, "worker worktree")
     spaced_content = make_spec(project, spaced_worktree_inbox).replace(
         "task_id: efficiency-task",
@@ -1082,6 +1119,7 @@ def _dispatch_with_gate(tmp, name, project, validation_command, tier):
     """Assign a task carrying validation_command + tier, then write a valid report."""
     inbox = os.path.join(tmp, name)
     os.makedirs(inbox, exist_ok=True)
+    write_usable_roster(inbox)
     spec_path = os.path.join(tmp, name + ".yaml")
     content = make_spec(project, inbox).replace(
         "validation_tier: targeted-test",
@@ -1194,6 +1232,7 @@ def test_moa_routing_spec(tmp):
     inbox = os.path.join(project, ".agent-inbox")
     os.makedirs(inbox, exist_ok=True)
     init_repo(project)
+    write_usable_roster(inbox)
 
     # A small-but-substantive task: 40 minutes, semantic, with 2 distinct models
     # and medium blast radius. Meets all three MOA layers, but none of the old

@@ -549,6 +549,7 @@ def main():
     all_ok = True
 
     tests = [
+        lambda: run(["--help"], expect_exit=0, label="help-exits-zero")[0],
         test_assigned_no_report,
         test_task_with_report,
         test_dry_run_deterministic,

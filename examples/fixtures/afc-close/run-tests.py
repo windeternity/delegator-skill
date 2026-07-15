@@ -135,11 +135,36 @@ def test_move_failure_rolls_back():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def test_event_append_failure_rolls_back_close():
+    src = os.path.join(PASS_DIR, "single-task")
+    tmpdir = tempfile.mkdtemp(prefix="afc-close-event-rollback-")
+    module = load_close_module()
+    original_argv = sys.argv[:]
+    try:
+        shutil.copytree(src, tmpdir, dirs_exist_ok=True)
+        task_path = os.path.join(tmpdir, "task-Worker-alpha.md")
+        with open(task_path, "r", encoding="utf-8") as handle:
+            original = handle.read()
+        module.append_event_once = lambda *args, **kwargs: (_ for _ in ()).throw(OSError("simulated append failure"))
+        sys.argv = [SCRIPT, "--task-id", "alpha", "--status", "CLOSED_GO", tmpdir]
+        rc = module.main()
+        archived = any("task-Worker-alpha.md" in files for _, _, files in os.walk(os.path.join(tmpdir, "archive")))
+        with open(task_path, "r", encoding="utf-8") as handle:
+            restored = handle.read()
+        ok = rc == 1 and not archived and restored == original
+        print("  [{}] event-append-failure-rolls-back-close".format("PASS" if ok else "FAIL"))
+        return ok
+    finally:
+        sys.argv = original_argv
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def main():
     print("Running afc-close.py fixture tests...")
     print()
     all_ok = True
-    for test_fn in [test_dry_run_no_move, test_close_moves_and_events, test_move_failure_rolls_back]:
+    for test_fn in [test_dry_run_no_move, test_close_moves_and_events, test_move_failure_rolls_back,
+                    test_event_append_failure_rolls_back_close]:
         try:
             ok = test_fn()
         except Exception as exc:

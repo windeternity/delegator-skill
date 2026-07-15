@@ -7,9 +7,9 @@ ask you for, and where your answers are stored.
 One principle holds everything together:
 
 > The source you installed is generic — no model, CLI, account, or path is
-> hard-coded. On your first delegation the agent interviews you once, records
-> your answers into this project's local `.agent-inbox/`, and reuses them on
-> every later call. **What it needs from you depends on your automation level.**
+> hard-coded. Delegator stores your default CAL and external-worker roster in
+> the install-local `LOCAL_ROSTER.md`, shared across projects. Project-local
+> `.agent-inbox/AGENT_ROSTER.md` is used only as an explicit project override.
 
 The deeper references (`docs/QUICKSTART.md`,
 `references/session-bootstrap-gate.md`,
@@ -20,10 +20,16 @@ The deeper references (`docs/QUICKSTART.md`,
 
 - **Coordinator-only.** Only the coordinator carries the skill. Workers install
   nothing — each worker receives one task file and one copy-paste line.
+- **No workers are created by install.** While Delegator is active, a
+  current-session subagent, built-in helper, internal `multi_agent` call, or
+  chat-only call is never used for exploration, review, implementation, or
+  fallback. `DIRECT` means the coordinator itself executes.
 - **Generic by design.** The installed files contain neutral placeholders
   (`<Agent Name>`, `<Model>`, `<CLI>`, `<PROJECT_ROOT>`), never your real
-  workers, accounts, or paths. Your specifics live only in your project-local
-  `.agent-inbox/`, never in the shared skill.
+  workers, accounts, or paths. Your specifics live in install-local `LOCAL_*`
+  files or an explicitly marked project override, never in published sources.
+- **Placeholders are not configuration.** A roster that still contains template
+  worker placeholders is invalid for LITE, FULL, or CAL dispatch.
 
 Install steps are in `README.md` / `README.zh-CN.md`. Come back here for the
 first delegation.
@@ -32,28 +38,36 @@ first delegation.
 
 Two separate one-time steps, at different moments:
 
-- **CAL level (first skill trigger).** The very first time you invoke the skill
-  on a project, the agent explains the CAL-1/CAL-2/CAL-3 distinction in a few
-  lines and asks you to pick a default. This is lightweight and runs once
-  regardless of routing (even for a `DIRECT` task). Once recorded, it is reused
-  and never re-asked.
+- **CAL level (first skill trigger, once per user).** The very first time you
+  invoke the skill, the agent first gives a one-time orientation: what the
+  skill is for (it coordinates EXTERNAL workers through bounded local task/report
+  files under your control — installing it creates no workers) and the three CAL
+  modes with per-mode trade-offs (`references/coordination-automation-levels.md`
+  §"Quick Comparison"). Only then does it ask you to pick a default and writes
+  it to the install-local `LOCAL_ROSTER.md` in the Skill directory, reused by
+  every project. This is lightweight and runs once regardless of routing (even
+  for a `DIRECT` task). Once recorded, it is reused and never re-asked.
 - **Resource/roster interview (first external dispatch).** The first time a
-  task is routed to an **external worker**, the agent runs a one-time bootstrap
-  before writing any task files or dispatching anyone. It does **not** run for
-  tasks the agent does directly (`DIRECT` route) — those need no worker, so
-  there is nothing to interview about.
+  task is routed to an **external worker** with no usable roster resolved, the
+  agent runs a one-time bootstrap before writing any task files or dispatching
+  anyone. It does **not** run for `DIRECT` tasks. By default the roster is the
+  install-local `LOCAL_ROSTER.md` (shared across projects); a project
+  `.agent-inbox/AGENT_ROSTER.md` is read only as an explicit override (add the
+  `<!-- AFC_ROSTER_SCOPE: project-override -->` marker). If the resolved roster
+  is missing, empty, placeholder-only, incomplete, or lacks the selected worker,
+  dispatch stops and the agent asks for the missing configuration.
 
 The interview is one compact block:
 
 ```text
-Session Bootstrap:
+External Dispatch Bootstrap:
 - Existing resources: <tools/models/accounts/runtimes you already have>
 - Available now: <usable workers, CLIs, providers, local runtimes>
 - Model preference order: <preferred models and fallbacks>
 - Avoid / unavailable: <models or routes to avoid, with reason>
 - Capability limits: <anything the agent must not assume>
 - Automation level (CAL): <CAL-1 | CAL-2 | CAL-3>   (default already chosen at first trigger; confirm or change here)
-- Record these as this project's default until I ask to change them?
+- Record these in LOCAL_ROSTER.md as the default until I ask to change them?
 ```
 
 You confirm or adjust, then the agent records and reuses your answers. If your
@@ -74,10 +88,12 @@ worker itself, or do you relay the handoff to the worker?**
 ### Why the difference
 
 - In **CAL-1 / CAL-2 you are the transport layer.** The agent never runs your
-  worker — it only hands you text to forward. So any model or account works,
-  even an unknown or chat-only model: the agent just needs a label to address
-  the handoff to. A capability smoke test is *optional* and only about whether
-  the model is good enough for the task (see §6).
+  worker — it only hands you text to forward. The target may be an external
+  chat, tool, IDE, CLI, model, or app session, but it must be recorded in the
+  roster as an external route with permissions and report-writing expectations.
+  A current-session subagent or internal helper is never valid. A capability
+  smoke test is *optional* and only about whether the external route is good
+  enough for the task (see §6).
 - In **CAL-3 the agent runs a process on your machine.** A wrong or missing CLI
   binding does not produce a polite error — it silently launches the wrong model
   or fails mid-batch. That is why CAL-3 turns CLI availability and verification
@@ -110,6 +126,23 @@ agent must confirm all of the following before the first automatic dispatch:
    cleanup, secrets handling, and permission escalation require explicit
    per-action authorization even under CAL-3.
 
+For long CAL-3 dispatches (roughly 10+ minutes), do not wait silently for the
+final timeout. During the run, check live artifacts such as
+`.agent-inbox/artifacts/cal3/<TASK_ID>/stderr.log`, `stdout.log`, and
+`.agent-inbox/events.jsonl`; Codex-style workers often write their live trace to
+stderr while stdout stays empty. Use `status.json` after dispatch finishes.
+Logs and heartbeats are progress/debug evidence only — completion still
+requires the exact schema-valid report file.
+
+If a worker needs a local SQLite/Chroma/vector-store directory outside the task
+workspace, configure that writable root explicitly in the local Codex sandbox
+config before dispatch. Delegator records the need, but does not auto-expand
+filesystem write boundaries.
+
+Codex CAL-3 recipes default `network_access` to `none`. Set
+`AFC_CAL3_CODEX_NETWORK_ACCESS=allowed` before probing only after local Codex
+`workspace-write` network access is explicitly configured.
+
 Generic commands (replace `<PROJECT_ROOT>` and `<TASK_ID>`):
 
 ```text
@@ -127,9 +160,11 @@ Full detail: `references/coordination-automation-levels.md` (CAL-3 section) and
 
 | What | Where | Notes |
 |---|---|---|
-| CAL level, resources, model order, avoid list, smoke status, confirmed date | `.agent-inbox/AGENT_ROSTER.md` — `SESSION PREFERENCES` block near the top | Project-local default |
-| One-line summary of the above | `.agent-inbox/events.jsonl` — `ROSTER_UPDATED` event | Append-only log |
-| CAL-3 invoke bindings | `.agent-inbox/invoke-recipes.json` | Local only — never copied into a public skill package |
+| CAL level, resources, model order, avoid list, smoke status, confirmed date | install-local `LOCAL_ROSTER.md` | User-profile default, shared across projects |
+| External worker rows, permissions, access path, report-writing ability | install-local `LOCAL_ROSTER.md` | Default roster before external dispatch |
+| Explicit project-specific differences | `.agent-inbox/AGENT_ROSTER.md` with `AFC_ROSTER_SCOPE: project-override` | Optional project override |
+| Project task/report lifecycle events | `.agent-inbox/events.jsonl` | Project-local append-only log |
+| CAL-3 invoke bindings | install-local `LOCAL_INVOKE_RECIPES.json` by default; `.agent-inbox/invoke-recipes.json` for a project override | Local only — never copied into a public skill package |
 
 **Never recorded:** secrets, tokens, API keys, account identifiers, or private
 API details. The recorded preference is a routing input, not an authority grant
@@ -138,8 +173,9 @@ requirements still override your stated preference when they conflict.
 
 ## 6. Reuse and change
 
-- Recorded preferences become this project's default. The agent does **not**
-  re-ask them every task or every thread.
+- Recorded preferences become the install-local user-profile default across
+  projects. The agent presence-checks once per coordinator session but does not
+  re-ask when the default exists.
 - It re-confirms only when you ask to change them, a route becomes unavailable,
   the roster conflicts with the current conversation, or a task needs a
   capability you did not record.
@@ -161,8 +197,8 @@ preference recording described in §2–§5. It is optional — the agent can do
 same steps inline — but useful for scripted or non-interactive setup.
 
 ```text
-# Check if CAL default is already recorded (exit 0 = yes, 1 = no)
-python -B scripts/afc-first-run-config.py --inbox <PROJECT_ROOT>/.agent-inbox --check-only
+# Literal first command: check install-local CAL default (exit 0 = yes, 1 = no)
+python -B scripts/afc-first-run-config.py --check-only
 
 # Print the standard first-run questionnaire
 python -B scripts/afc-first-run-config.py --print-questionnaire
@@ -170,8 +206,8 @@ python -B scripts/afc-first-run-config.py --print-questionnaire
 # Get a conservative CAL recommendation based on described resources
 python -B scripts/afc-first-run-config.py --recommend --resources "..." --available-now "..."
 
-# Write preferences (validates CAL, rejects secrets, records event)
-python -B scripts/afc-first-run-config.py --inbox <PROJECT_ROOT>/.agent-inbox \
+# Write install-local preferences (validates CAL and rejects secrets)
+python -B scripts/afc-first-run-config.py \
     --default-cal CAL-2 \
     --resources "Claude Code CLI, codex CLI" \
     --available-now "worker-cli, backup-cli" \
@@ -181,14 +217,49 @@ python -B scripts/afc-first-run-config.py --inbox <PROJECT_ROOT>/.agent-inbox \
     --confirmed-at 2026-06-27
 ```
 
-The helper writes into the `SESSION PREFERENCES` comment block in
-`AGENT_ROSTER.md` and appends a `ROSTER_UPDATED` event to `events.jsonl`. It
-never records secrets, tokens, API keys, or account identifiers — any such
-input is rejected before writing.
+The helper writes the install-local `LOCAL_ROSTER.md` by default and writes no
+project event for that user-profile choice. Pass an explicit project override
+only when project-specific routing is intended. It never records secrets,
+tokens, API keys, or account identifiers.
 
-The `--check-only` mode is the cheapest way for the coordinator to implement the
-First-Run CAL Init presence check: one subprocess call, zero roster hydration,
-exit code only.
+The `--check-only` mode is the cheapest way to implement the First-Run CAL Init
+presence check: one subprocess call and zero roster hydration. An unconfigured
+result exits 1 and emits `next_action: ASK_CAL`; routing must not run first.
+
+Use `--roster-status` only after routing selects external dispatch. It performs
+the full read-only gate and reports `missing`, `placeholder_only`, `incomplete`,
+or `usable`.
+
+## 9. Session orientation: one command to know what to do next
+
+At the start of any coordinator session, use `afc-snapshot.py --next-action`
+to get a compact summary of what requires attention:
+
+```powershell
+python -B scripts/afc-snapshot.py --next-action .agent-inbox
+```
+
+Returns a bounded read-only summary:
+
+```text
+route_required: yes | no
+cal_default_recorded: yes | no
+active_tasks: N
+new_reports: N
+rejected_reports: N
+stale_tasks: N
+recommended_next_action: route_direct | ask_cal | review_report | wait_for_reports | close_task | no_action
+read_next:
+  - <up to 3 most important file paths>
+run_next:
+  - <at most 1 recommended command>
+```
+
+This command is optional but removes coordinator ambiguity at session start. It
+is designed to be cheap: it scans the inbox directory, reads frontmatter only,
+does not read full report bodies, and calls no validators by default.
+
+Add `--json` to get machine-readable output for integration.
 
 ## Where to go next
 

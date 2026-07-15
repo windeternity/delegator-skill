@@ -1,20 +1,17 @@
 # Session Bootstrap Gate
 
-On the first Delegator invocation in a conversation thread, the coordinator runs
-a one-time bootstrap before writing any task files or dispatching any workers.
-This gate decides whether delegation is worthwhile and aligns the user's
-resource inventory, execution-model preferences, and fixed session routing
-roster.
+At the first Delegator activation in each coordinator session, the coordinator
+runs one cheap CAL-default presence check before routing. The persisted choice
+is install-local user-profile state, not per-thread or per-project state, so a
+configured profile does not reopen onboarding.
 
-The CAL level is chosen separately and earlier, at the **first skill trigger**
-for a project (see "CAL Level Pre-Selection" below), so the coordinator knows
-the project default before any routing decision. The resource/model/roster
-interview in this gate runs only at the first external dispatch, where it is
-actually needed.
+The fuller resource/model/roster interview runs only before an external
+dispatch when the resolved roster is missing, stale, contradicted, incomplete,
+or explicitly changed. `DIRECT` never pays that full-read cost.
 
 ## Bootstrap Decision Flow
 
-On the first Delegator invocation:
+After the CAL presence check, route each task:
 
 1. **Read the project roadmap** (e.g., `docs/ROADMAP.md`) if present. If absent, evaluate the user's requested work directly from the conversation.
 2. **Decide DIRECT vs DELEGATE** using the following criteria:
@@ -28,17 +25,18 @@ On the first Delegator invocation:
 | Review depth | No review needed | Independent review adds real value |
 | Repeated-loop needs | One-shot fix | Iterative fix-verify cycles benefit from worker isolation |
 
-3. **If DIRECT**: briefly state why (one sentence) and do not create coordination artifacts unless the user explicitly insists.
-4. **If DELEGATE**: proceed to startup alignment. If no project-local resource
-   inventory and execution preferences are recorded yet, the coordinator must
-   ask the user before the first external dispatch.
+3. **If DIRECT**: briefly state why (one sentence) and do not create coordination artifacts unless the user explicitly insists. Never run the full resource/bootstrap interview before a `DIRECT` route.
+4. **If DELEGATE**: proceed to startup alignment. If no usable resolved resource
+   inventory and execution preferences are recorded yet, or if the roster is
+   missing, placeholder-only, incomplete, or unmatched for the selected worker,
+   the coordinator must ask the user before the first external dispatch.
 
 ## Startup Alignment
 
-When delegation is chosen and no confirmed project-local preference exists, present one compact block covering:
+When delegation is chosen and no confirmed usable resolved preference exists, present one compact block covering:
 
 ```text
-Session Bootstrap:
+External Dispatch Bootstrap:
 - Existing resources: <tools/models/accounts/runtimes the user already has>
 - Available now: <usable workers, providers, CLI aliases, local runtimes, paused routes>
 - Execution preference: <preferred coordinator / worker tool-model pairs, avoid list, special constraints>
@@ -50,28 +48,36 @@ Session Bootstrap:
   - reviewer: <Agent Name> / <Model> — independent review, guardrail audit
   - fallback: <Agent Name> / <Model> — overflow or specialized tasks
   - paused/unavailable: <Agent Name> (reason) — excluded from assignment
-- Record these as this project's default until you ask to change them?
+- Record these in the install-local roster, or as an explicit project override?
 ```
 
 The user may adjust the available resources, CAL level, route, preferred
 model/tool pair, fallback order, or avoid list before confirming. Once
-confirmed, these preferences become the **project-local default** and are not
-re-litigated on every task or thread. Reconfirm only when the user asks to
-change them, a selected worker becomes unavailable, the roster conflicts with
-the current conversation, or the requested task needs a capability not covered
-by the recorded preference.
+confirmed, these preferences become the **resolved default**: install-local and
+shared across projects unless the user explicitly selects a project override.
+Reconfirm only when the user asks to change them, a selected worker becomes
+unavailable, the roster conflicts with the current conversation, or the task
+needs a capability not covered by the recorded preference.
 
 ## Preference Recording
 
 Record the confirmed preference without changing schema:
 
-- Add or update a short local preference note in `.agent-inbox/AGENT_ROSTER.md` near the top of the file, or in the relevant roster row `Notes` cells.
+- Write/update the install-local `LOCAL_ROSTER.md` in the Skill directory (the
+  default source of truth, shared across projects). A project
+  `.agent-inbox/AGENT_ROSTER.md` is written only as an explicit override.
 - Include resource availability, preferred model order, avoid/unavailable
   routes, and any smoke-test status in that note when known.
-- Append a `ROSTER_UPDATED` event to `.agent-inbox/events.jsonl` summarizing the CAL level, resource inventory, and execution-model preference.
 - Do not record secrets, account identifiers, private API details, or unstable benchmark claims.
 
 The recorded preference is a routing input, not an authority grant. Capability, safety, permission scope, worktree locks, and evidence requirements still override user preference when they conflict.
+
+The roster is resolved by `afc_roster.resolve_roster`: explicit `--roster-file`
+/ `AFC_ROSTER_FILE`, then a marked project override, then install-local
+`LOCAL_ROSTER.md`, then (legacy fallback) an unmarked project roster only when
+LOCAL is absent. A usable roster is required before external dispatch, but not
+before routing. `DIRECT` tasks still stop after the cheap first-run CAL
+presence check and must not hydrate the full roster.
 
 ## User Confirmation Gate
 
@@ -94,46 +100,75 @@ The user may replace an agent or model mid-session:
 
 | Gate | When | Purpose |
 |------|------|---------|
-| Session Bootstrap Gate (this document) | First Delegator invocation per thread | Decide DIRECT vs DELEGATE; align session routing roster |
-| Roster Gate (`SKILL.md`) | Before first task assignment | Confirm agent roster is current |
+| CAL Default Presence Check | First Delegator activation per coordinator session | Reuse or collect the install-local user-profile CAL default before routing |
+| External Dispatch Bootstrap | Before external dispatch when the resolved roster is not usable | Align the resolved external-worker roster |
+| Roster Gate (`SKILL.md`) | After LITE/FULL/CAL route, before handoff/task generation/dispatch | Confirm roster_status=usable |
 | Delegation ROI Gate (`SKILL.md`) | Per task | Decide whether to delegate or execute directly |
 | Delegation Granularity Bounds (H6) | Per task | Check lower bound, round budget, upper bound |
 
-The Session Bootstrap Gate runs at first use for a project and again only when recorded preferences are missing, stale, contradicted, or explicitly changed by the user. The Roster Gate and Delegation ROI Gate run **per task** as before. The bootstrap does not replace or weaken any existing gate.
+The cheap presence check runs once per coordinator session; it asks the user only
+when the install-local profile has no recorded CAL default. The external
+dispatch bootstrap runs only when the resolved roster is missing, stale,
+contradicted, incomplete, or explicitly changed. The Roster Gate and Delegation
+ROI Gate run **per task** as before. The bootstrap does not replace or weaken
+any existing gate. The Roster Gate is a **hot-path precondition enforced inside
+each dispatch script** (`afc-assign.py`, `afc-lite.py`, `afc-cal2-arm.py`,
+`afc-cal3-dispatch.py`), not coordinator discretion — an unusable roster fails
+closed before any task file, dispatch event, watcher, or CLI launch.
+
+## Repeat-Work Budget
+
+Onboarding and safety gates must not become recurring coordinator work. SKILL.md
+keeps only the invariant; the allowed/forbidden list lives here.
+
+Allowed recurring:
+
+- one cheap `--check-only` presence check per session start;
+- one `--roster-status` check only after routing selects external dispatch;
+- a CAL-3 probe only when CAL-3 is selected and the binding/probe is missing,
+  stale, changed, or previously failed.
+
+Forbidden recurring:
+
+- re-explaining the product or CAL modes after a default is recorded;
+- running the full resource interview before `DIRECT`;
+- asking the user to fully configure CAL-1/2/3 when one selected/default route
+  suffices;
+- reading full inbox history or report bodies only to gate dispatch;
+- full CLI probes on every CAL-3 task when a valid binding is recorded;
+- generating coordination artifacts merely to justify a `DIRECT` route.
 
 ## CAL Level Pre-Selection
 
-At the first skill trigger for a project, before any routing, the coordinator
-runs a one-time lightweight step when no CAL default is recorded:
+At the first Delegator activation in each coordinator session, before any
+routing, the coordinator runs this lightweight sequence:
 
-1. Read `.agent-inbox/AGENT_ROSTER.md` (or note the file is absent). If a CAL
-   default is already recorded, skip this step entirely — do not re-ask.
-   Cheap presence check: `python -B scripts/afc-first-run-config.py --inbox
-   <DIR> --check-only` (exit 0 = configured, 1 = not).
+1. Read the resolved roster (install-local `LOCAL_ROSTER.md` by default; or note
+   it is absent). If a CAL default is already recorded, skip this step entirely
+   — do not re-ask. Cheap presence check: `python -B scripts/afc-first-run-config.py --check-only` (exit 0 = configured, 1 = not). `--skill-root` is a test/dev override of the Skill root; do not point it at a project inbox.
 2. If unrecorded, present a compact CAL-1/CAL-2/CAL-3 distinction and ask the
    user to pick a default:
    - **CAL-1** (manual relay): safe default, works with any worker, no watcher required.
    - **CAL-2** (auto intake): recommended when the coordinator host supports foreground watchers and the user wants reduced relay overhead.
    - **CAL-3** (full auto): the coordinator launches workers via a local CLI. Highest automation, highest risk; the first automatic dispatch still requires the CLI verification gate (`docs/FIRST_RUN.md` §4).
-3. If `.agent-inbox/` is absent, run `afc-init` once to create the scaffold,
-   then record. Record the choice in `AGENT_ROSTER.md` SESSION PREFERENCES and
-   append a `ROSTER_UPDATED` event to `events.jsonl`.
+3. Record the choice in `LOCAL_ROSTER.md` SESSION PREFERENCES (no project
+   `events.jsonl` is written). Scaffold from `templates/TEMPLATE_LOCAL_ROSTER.md`
+   if the file does not exist.
 4. If the user does not answer and work must proceed, use CAL-1 for that
    invocation only and leave the preference unrecorded.
 
-This pre-selection is the read-budget mechanism for initialization: one cheap
-presence check skips the whole interview on every later invocation. It runs
-once per project regardless of routing outcome (including DIRECT); after it,
-DIRECT tasks stop immediately as usual.
+This is the read-budget mechanism for initialization: the check runs once per
+coordinator session, including sessions that route `DIRECT`; the orientation
+and choice run only once per install-local user profile. After the check,
+`DIRECT` tasks stop immediately as usual.
 
 ## CAL Level Selection
 
-The recorded CAL default governs future coordination for the project until the
-user changes it, the watcher/worker route is unavailable, or a task needs a
-capability outside the recorded preference. CAL-1, CAL-2, and CAL-3 are all
-valid recorded defaults. Recording CAL-3 does not skip its dispatch gate: the
-first automatic dispatch under CAL-3 still requires the CLI verification
-prerequisites in "Mode-Dependent Resource Requirements" and `docs/FIRST_RUN.md`
+The install-local CAL default governs future coordination across projects until
+the user changes it. An explicitly marked project roster may override it for
+that project. CAL-1, CAL-2, and CAL-3 are valid recorded defaults, but recording
+CAL-3 does not skip its dispatch gate: the first automatic dispatch still
+requires the CLI verification prerequisites below and in `docs/FIRST_RUN.md`
 §4.
 
 ## Mode-Dependent Resource Requirements
@@ -144,10 +179,13 @@ distinction, not the model brand.
 
 - **CAL-1 / CAL-2 (and LITE): the user is the transport.** The coordinator never
   invokes the worker programmatically — it emits handoff text the user forwards.
-  Any model, account, or even a chat-only worker is acceptable, including
-  unknown models, because the agent only needs a label to address the handoff
-  to. A capability smoke test is optional (see
-  `references/unknown-model-discovery.md`); there is **no CLI verification gate**.
+  The target may be an external chat, tool, model, CLI, IDE, or app session,
+  including an unfamiliar model, but it must be recorded as an external roster
+  route with permissions and report-writing expectations. A current-session
+  subagent, built-in helper, internal `multi_agent` call, or chat-only call
+  inside the coordinator runtime is never valid. A capability smoke test is
+  optional (see `references/unknown-model-discovery.md`); there is **no CLI
+  verification gate**.
 - **CAL-3: the coordinator runs a process on the user's machine.** Before the
   first automatic dispatch the bootstrap must confirm a **callable** Agent/CLI
   per worker alias, record its exact invoke binding (environment/home, provider,

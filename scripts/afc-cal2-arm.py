@@ -23,10 +23,12 @@ from datetime import date
 try:
     from afc_event import add_event_context, append_event_once
     from afc_frontmatter import parse_frontmatter_flat
+    from afc_roster import require_usable_roster, format_roster_block, maybe_warn_roster
 except ModuleNotFoundError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from afc_event import add_event_context, append_event_once
     from afc_frontmatter import parse_frontmatter_flat
+    from afc_roster import require_usable_roster, format_roster_block, maybe_warn_roster
 
 
 SKIP_DIRS = {"archive", "artifacts", "__pycache__"}
@@ -286,6 +288,39 @@ def main(argv=None):
             print("error: {}".format(err), file=sys.stderr)
             return 1
         tasks.append(task_data)
+
+    # Per-task roster fail-closed gate (O3b): proving the roster has SOME usable
+    # external route is not enough — EACH task's agent_name must be a usable
+    # rostered route, since arm is a dispatch-producing entrypoint. Runs before
+    # any TASK_DISPATCHED event or watcher side effect, and before the
+    # --dry-run short-circuit. require_cal3=False is a safe backstop: a CAL-3
+    # dispatch reaching this armer via run_watch() has already passed the
+    # stricter require_cal3=True gate in afc-cal3-dispatch.py.
+    for task_data in tasks:
+        agent_name = task_data.get("agent_name", "").strip()
+        if not agent_name:
+            # A blank agent_name cannot be verified against the roster, and
+            # roster_status() only applies its per-agent filter when agent_name
+            # is truthy — so reject it explicitly rather than letting the gate
+            # degrade to "any usable route".
+            print(
+                "ROSTER_BLOCKED: task '{}' has no agent_name; an external route "
+                "cannot be verified".format(task_data.get("task_id", "")),
+                file=sys.stderr,
+            )
+            return 1
+        ok, status = require_usable_roster(
+            args.inbox,
+            agent_name=agent_name,
+            require_cal3=False,
+        )
+        if not ok:
+            print(format_roster_block(status), file=sys.stderr)
+            return 1
+
+    # The roster warning (e.g. legacy-fallback nudge) is roster-source level,
+    # identical across tasks; emit once from the last task's status.
+    maybe_warn_roster(status)
 
     events_path = os.path.join(args.inbox, "events.jsonl")
     for task_data in tasks:

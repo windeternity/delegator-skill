@@ -59,6 +59,37 @@ moa:
 The synthesis pass compares reports; it does not inherit worker authority.
 Final `GO / PARTIAL / RED` still belongs to the coordinator verdict.
 
+## Challenge Review Preset
+
+Challenge (adversarial) review is a **task shape**, not a new mode or field. It
+reuses `moa_review` (or a single `delegate_full` reviewer task) with a purpose
+that pressure-tests the work instead of just hunting defects.
+
+Use it when the coordinator needs an independent reviewer to challenge design,
+tradeoffs, assumptions, rollback, race conditions, security/privacy, and whether
+a simpler approach is safer. Do not use it for tiny direct edits or purely
+mechanical changes.
+
+Drop this into the candidate task's purpose (no schema change):
+
+```text
+Purpose:
+Run an adversarial review of the current implementation. Challenge the design,
+tradeoffs, assumptions, rollback path, race conditions, reliability risks, and
+whether a simpler approach would be safer.
+
+Non-goals:
+Do not patch code. Do not approve final GO/PARTIAL/RED. Do not expand scope. Do
+not request permission escalation.
+
+Evidence to report:
+Concrete file refs, risk reasoning, likely false positives, and recommended
+follow-up. Worker agreement is not authority.
+```
+
+The report uses the normal task/report schema and remains evidence only. Final
+`GO / PARTIAL / RED` still belongs to the coordinator verdict.
+
 ## Rules
 
 - Do not use MOA labels for ordinary split implementation.

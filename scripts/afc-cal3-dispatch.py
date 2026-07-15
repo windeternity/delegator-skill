@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -26,6 +27,7 @@ try:
         parse_frontmatter_flat,
         extract_structured_frontmatter,
     )
+    from afc_roster import format_roster_block, maybe_warn_roster, require_usable_roster, resolve_recipes, resolve_roster
     from afc_validation import validate_report_schema
 except ModuleNotFoundError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -34,6 +36,7 @@ except ModuleNotFoundError:
         parse_frontmatter_flat,
         extract_structured_frontmatter,
     )
+    from afc_roster import format_roster_block, maybe_warn_roster, require_usable_roster, resolve_recipes, resolve_roster
     from afc_validation import validate_report_schema
 
 
@@ -62,6 +65,24 @@ PROFILES = {
         "network_access": "none",
         "commit_push": "no",
     },
+    "cal3-network-readonly": {
+        "modify_source": False,
+        "run_commands": "read_only",
+        "network_access": "allowed",
+        "commit_push": "no",
+    },
+    "cal3-network-work": {
+        "modify_source": True,
+        "run_commands": "bounded",
+        "network_access": "allowed",
+        "commit_push": "no",
+    },
+    "cal3-approved-commit": {
+        "modify_source": True,
+        "run_commands": "bounded",
+        "network_access": "allowed",
+        "commit_push": "approved",
+    },
     "cal3-release-gated": {
         "modify_source": True,
         "run_commands": "bounded",
@@ -88,6 +109,7 @@ SECRET_PATTERNS = [
         lambda m: "<redacted-secret>",
     ),
 ]
+DEFAULT_ABORT_FAILURE_PATTERN = r"(?i)(?:status(?:\s+code)?|http|->)[^\n\r]*\b[45]\d\d\b"
 
 
 def utc_now_iso():
@@ -134,6 +156,145 @@ def tail_redacted(path, lines=80):
     except OSError:
         return ""
     return redact_text("".join(content[-lines:]))
+
+
+def file_size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def read_from_offset(path, offset):
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            handle.seek(offset)
+            text = handle.read()
+            return text, handle.tell()
+    except OSError:
+        return "", offset
+
+
+def last_nonempty_line(path):
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            lines = handle.readlines()
+    except OSError:
+        return ""
+    for line in reversed(lines):
+        stripped = line.strip()
+        if stripped:
+            return redact_text(stripped)
+    return ""
+
+
+def primary_log_path(stdout_path, stderr_path):
+    if file_size(stderr_path) > 0:
+        return stderr_path
+    return stdout_path
+
+
+def combined_log_tail(stdout_path, stderr_path, lines=80):
+    parts = []
+    stdout_tail = tail_redacted(stdout_path, lines)
+    stderr_tail = tail_redacted(stderr_path, lines)
+    if stdout_tail:
+        parts.append("stdout:\n{}".format(stdout_tail))
+    if stderr_tail:
+        parts.append("stderr:\n{}".format(stderr_tail))
+    return "\n".join(parts)
+
+
+def write_log_readme(log_dir):
+    text = """# CAL-3 Worker Logs
+
+- `stderr.log` often contains the live worker trace for `codex exec`; it may be the primary log.
+- `stdout.log` may be empty and is not completion evidence.
+- Completion still requires the exact schema-valid report file declared by the task.
+- `status.json` records redacted log tails, primary log selection, timeout/abort details, and report validation.
+"""
+    with open(os.path.join(log_dir, "LOGS.md"), "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
+
+
+def subprocess_startup_kwargs():
+    if os.name == "nt":
+        return {}
+    return {"start_new_session": True}
+
+
+def fallback_terminate_process(process):
+    result = {"method": "terminate", "pid": process.pid}
+    try:
+        process.terminate()
+        try:
+            result["exit_code"] = process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            result["method"] = "kill"
+            result["exit_code"] = process.wait(timeout=5)
+    except OSError as exc:
+        result["error"] = str(exc)
+    return result
+
+
+def terminate_process_tree(process):
+    result = {"attempted": True, "pid": process.pid}
+    if process.poll() is not None:
+        result["method"] = "already_exited"
+        result["exit_code"] = process.returncode
+        return result
+
+    if os.name == "nt":
+        result["method"] = "taskkill"
+        try:
+            completed = subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+                shell=False,
+            )
+            result["return_code"] = completed.returncode
+            if completed.stderr:
+                result["stderr"] = completed.stderr.strip()[:500]
+            if completed.stdout:
+                result["stdout"] = completed.stdout.strip()[:500]
+            try:
+                result["exit_code"] = process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                result["fallback"] = fallback_terminate_process(process)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            result["error"] = str(exc)
+            result["fallback"] = fallback_terminate_process(process)
+        return result
+
+    result["method"] = "process_group"
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            result["exit_code"] = process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            result["signal"] = "SIGKILL"
+            result["exit_code"] = process.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        result["error"] = str(exc)
+        result["fallback"] = fallback_terminate_process(process)
+    return result
+
+
+def termination_exit_code(termination):
+    if not isinstance(termination, dict):
+        return None
+    if "exit_code" in termination:
+        return termination.get("exit_code")
+    fallback = termination.get("fallback")
+    if isinstance(fallback, dict):
+        return fallback.get("exit_code")
+    return None
 
 
 def relpath_posix(path, root):
@@ -229,9 +390,12 @@ def check_permission(task, profile_name):
         return "commit_push {} exceeds CAL-3 profile limit {}".format(
             commit_push, profile["commit_push"]
         )
-    if commit_push == "approved" and profile_name != "cal3-release-gated":
-        return "commit_push approved requires cal3-release-gated"
     return None
+
+
+def profile_allows_commit(profile_name):
+    profile = PROFILES.get(profile_name, {})
+    return normalized(profile.get("commit_push", "no")) == "approved"
 
 
 def check_cli_capability(task, recipe):
@@ -469,7 +633,29 @@ def recipe_uses_workspace_sandbox(recipe, profile_name, argv):
     return any(str(item) in {"workspace-write", "read-only"} for item in argv)
 
 
-def validate_expected_report(report_path, expected_task_id):
+def _nested_task_for_validation(task):
+    """Rebuild permission_scope as a nested dict for validate_report_schema.
+
+    CAL-3 dispatch tasks come from parse_frontmatter_flat, which stores
+    nested fields as dotted keys (e.g. permission_scope.modify_source).
+    validate_report_schema's modify_source cross-check only fires when
+    task['permission_scope'] is a dict, so rebuild that one group from the
+    dotted keys; top-level fields (agent_name, coordination_mode,
+    comparison_group) are already flat-correct and are left untouched.
+    """
+    if not task or isinstance(task.get("permission_scope"), dict):
+        return task
+    nested = dict(task)
+    scope = {}
+    for key, value in task.items():
+        if isinstance(key, str) and key.startswith("permission_scope."):
+            scope[key[len("permission_scope."):]] = value
+    if scope:
+        nested["permission_scope"] = scope
+    return nested
+
+
+def validate_expected_report(report_path, expected_task_id, task=None):
     # Structured parse preserves list-block fields (evidence_refs etc.) as
     # real lists; the flat/nested parser collapses them to "", which would
     # bypass validate_report_schema's non-empty-list check. Matches the
@@ -486,7 +672,16 @@ def validate_expected_report(report_path, expected_task_id):
         return False, "task_id mismatch: expected '{}', got '{}'".format(
             expected_task_id, report_task_id
         )
-    is_valid, reasons = validate_report_schema(data, body=body)
+    # Pass the parsed task so the agent_name / coordination_mode /
+    # comparison_group / modify_source cross-checks inside
+    # validate_report_schema run here at dispatch intake, not later at the
+    # intake stage. Mirrors afc-watch.py's two call sites. The CAL-3 dispatch
+    # task is flat-parsed, so nest its permission_scope.* dotted keys
+    # (_nested_task_for_validation) or the modify_source check would be
+    # silently skipped.
+    is_valid, reasons = validate_report_schema(
+        data, body=body, task=_nested_task_for_validation(task)
+    )
     if not is_valid:
         return False, "; ".join(reasons)
     return True, None
@@ -581,6 +776,18 @@ def choose_recipe(task, recipes_data):
 
 
 def prompt_for_task(task, workspace, task_path, report_path):
+    # Include coordination metadata in the report template when the task
+    # carries it, so a worker hand-writing a report (not using afc-report.py,
+    # which already echoes these) writes coordination_mode / comparison_group
+    # too. Otherwise the dispatch-time task cross-check would flag a mismatch
+    # on coordinated CAL-3 tasks.
+    coord_lines = ""
+    _cm = str(task.get("coordination_mode") or "").strip()
+    _cg = str(task.get("comparison_group") or "").strip()
+    if _cm:
+        coord_lines += "coordination_mode: {}\n".format(_cm)
+    if _cg:
+        coord_lines += "comparison_group: {}\n".format(_cg)
     return (
         "You are {agent}. Open this existing worktree as the project: {workspace}. "
         "Read this task file: {task_path}. Execute only that task within its "
@@ -597,6 +804,7 @@ def prompt_for_task(task, workspace, task_path, report_path):
         "schema_version: 0.1.0\n"
         "task_id: {task_id}\n"
         "agent_name: {agent}\n"
+        "{coord_lines}"
         "verdict: GO\n"
         "changed_files:\n"
         "  - none\n"
@@ -626,6 +834,7 @@ def prompt_for_task(task, workspace, task_path, report_path):
         workspace=workspace,
         task_path=task_path,
         report_path=report_path,
+        coord_lines=coord_lines,
     )
 
 
@@ -706,7 +915,7 @@ def append_dispatched(events_path, task, created_at, profile_name, recipe_id, lo
     append_event_once(events_path, event)
 
 
-def append_started(events_path, task, created_at, profile_name, recipe_id, log_dir, pid):
+def append_started(events_path, task, created_at, profile_name, recipe_id, log_dir, pid, attempt):
     task_id = task.get("task_id", "")
     event = event_base(
         "evt-{}-started-{}".format(task_id, pid),
@@ -718,8 +927,221 @@ def append_started(events_path, task, created_at, profile_name, recipe_id, log_d
     event["cal3_permission_profile"] = profile_name
     event["invoke_recipe"] = recipe_id
     event["worker_session_id"] = "pid:{}".format(pid)
+    event["attempt"] = attempt
     event["log_path"] = log_dir.replace("\\", "/")
     append_event_once(events_path, event)
+
+
+def append_worker_heartbeat(events_path, task, created_at, log_dir, pid, attempt, sequence, stdout_path, stderr_path, last_sizes):
+    task_id = task.get("task_id", "")
+    stdout_size = file_size(stdout_path)
+    stderr_size = file_size(stderr_path)
+    event = event_base(
+        "evt-{}-heartbeat-{}-{}".format(task_id, pid, sequence),
+        "WORKER_HEARTBEAT",
+        task,
+        created_at,
+        "CAL-3 worker heartbeat for task {}.".format(task_id),
+    )
+    event["worker_session_id"] = "pid:{}".format(pid)
+    event["attempt"] = attempt
+    event["log_path"] = log_dir.replace("\\", "/")
+    event["stdout_bytes"] = stdout_size
+    event["stderr_bytes"] = stderr_size
+    event["stdout_delta"] = max(0, stdout_size - last_sizes.get("stdout", 0))
+    event["stderr_delta"] = max(0, stderr_size - last_sizes.get("stderr", 0))
+    event["last_stderr_line"] = last_nonempty_line(stderr_path)
+    append_event_once(events_path, event)
+    return {"stdout": stdout_size, "stderr": stderr_size}
+
+
+def append_task_aborted(events_path, task, created_at, reason, evidence_tail, termination, pid, attempt):
+    task_id = task.get("task_id", "")
+    event = event_base(
+        "evt-{}-aborted-{}-{}".format(task_id, pid, attempt),
+        "TASK_ABORTED",
+        task,
+        created_at,
+        "CAL-3 aborted task {}: {}.".format(task_id, reason),
+    )
+    event["abort_reason"] = reason
+    event["abort_evidence_tail"] = evidence_tail
+    event["termination"] = termination
+    event["worker_session_id"] = "pid:{}".format(pid)
+    event["attempt"] = attempt
+    append_event_once(events_path, event)
+
+
+def monitor_processes(processes, args, events_path):
+    active = {}
+    now = time.time()
+    for task_id, (process, stdout_handle, stderr_handle, spec) in processes.items():
+        active[task_id] = {
+            "process": process,
+            "stdout_handle": stdout_handle,
+            "stderr_handle": stderr_handle,
+            "spec": spec,
+            "deadline": now + max(1, args.timeout_seconds or int(spec["recipe"].get("timeout_seconds", 1800))),
+            "last_progress_at": now,
+            "last_sizes": {
+                "stdout": file_size(spec["stdout_path"]),
+                "stderr": file_size(spec["stderr_path"]),
+            },
+            "last_heartbeat_at": now,
+            "heartbeat_sequence": 0,
+            "stdout_offset": 0,
+            "stderr_offset": 0,
+            "failure_count": 0,
+        }
+    outcomes = {}
+    failure_pattern = re.compile(args.abort_failure_pattern) if args.abort_on_repeated_failures > 0 else None
+
+    def finish_exited_task(task_id, state, grace_seconds=0):
+        process = state["process"]
+        return_code = process.poll()
+        if return_code is None and grace_seconds > 0:
+            try:
+                return_code = process.wait(timeout=grace_seconds)
+            except subprocess.TimeoutExpired:
+                return_code = None
+        if return_code is None:
+            return False
+        outcomes[task_id] = {"return_code": return_code}
+        state["stdout_handle"].close()
+        state["stderr_handle"].close()
+        del active[task_id]
+        return True
+
+    while active:
+        now = time.time()
+        for task_id in list(active):
+            state = active[task_id]
+            process = state["process"]
+            spec = state["spec"]
+            if finish_exited_task(task_id, state):
+                continue
+
+            stdout_size = file_size(spec["stdout_path"])
+            stderr_size = file_size(spec["stderr_path"])
+            if stdout_size > state["last_sizes"]["stdout"] or stderr_size > state["last_sizes"]["stderr"]:
+                state["last_progress_at"] = now
+
+            if failure_pattern:
+                stdout_text, state["stdout_offset"] = read_from_offset(
+                    spec["stdout_path"], state["stdout_offset"]
+                )
+                stderr_text, state["stderr_offset"] = read_from_offset(
+                    spec["stderr_path"], state["stderr_offset"]
+                )
+                text = stdout_text + "\n" + stderr_text
+                matches = failure_pattern.findall(text)
+                state["failure_count"] += len(matches)
+                if state["failure_count"] >= args.abort_on_repeated_failures:
+                    if finish_exited_task(task_id, state, grace_seconds=0.2):
+                        continue
+                    termination = terminate_process_tree(process)
+                    evidence_tail = combined_log_tail(
+                        spec["stdout_path"],
+                        spec["stderr_path"],
+                        args.log_tail_lines,
+                    )
+                    append_task_aborted(
+                        events_path,
+                        spec["task"],
+                        args.created_at,
+                        "repeated_failures",
+                        evidence_tail,
+                        termination,
+                        process.pid,
+                        spec["attempt"],
+                    )
+                    outcomes[task_id] = {
+                        "return_code": termination_exit_code(termination),
+                        "state": "ABORTED",
+                        "abort_reason": "repeated_failures",
+                        "abort_evidence_tail": evidence_tail,
+                        "abort_termination": termination,
+                    }
+                    state["stdout_handle"].close()
+                    state["stderr_handle"].close()
+                    del active[task_id]
+                    continue
+
+            if args.abort_on_no_progress_seconds > 0 and now - state["last_progress_at"] >= args.abort_on_no_progress_seconds:
+                if finish_exited_task(task_id, state, grace_seconds=0.2):
+                    continue
+                termination = terminate_process_tree(process)
+                evidence_tail = tail_redacted(primary_log_path(spec["stdout_path"], spec["stderr_path"]), args.log_tail_lines)
+                append_task_aborted(
+                    events_path,
+                    spec["task"],
+                    args.created_at,
+                    "no_progress",
+                    evidence_tail,
+                    termination,
+                    process.pid,
+                    spec["attempt"],
+                )
+                outcomes[task_id] = {
+                    "return_code": termination_exit_code(termination),
+                    "state": "ABORTED",
+                    "abort_reason": "no_progress",
+                    "abort_evidence_tail": evidence_tail,
+                    "abort_termination": termination,
+                }
+                state["stdout_handle"].close()
+                state["stderr_handle"].close()
+                del active[task_id]
+                continue
+
+            if now >= state["deadline"]:
+                if finish_exited_task(task_id, state, grace_seconds=0.2):
+                    continue
+                termination = terminate_process_tree(process)
+                evidence_tail = combined_log_tail(
+                    spec["stdout_path"], spec["stderr_path"], args.log_tail_lines
+                )
+                append_task_aborted(
+                    events_path,
+                    spec["task"],
+                    args.created_at,
+                    "timeout",
+                    evidence_tail,
+                    termination,
+                    process.pid,
+                    spec["attempt"],
+                )
+                outcomes[task_id] = {
+                    "return_code": termination_exit_code(termination),
+                    "state": "TIMEOUT",
+                    "timeout_termination": termination,
+                }
+                state["stdout_handle"].close()
+                state["stderr_handle"].close()
+                del active[task_id]
+                continue
+
+            if args.heartbeat_interval_seconds > 0 and now - state["last_heartbeat_at"] >= args.heartbeat_interval_seconds:
+                state["heartbeat_sequence"] += 1
+                state["last_sizes"] = append_worker_heartbeat(
+                    events_path,
+                    spec["task"],
+                    args.created_at,
+                    spec["log_dir"],
+                    process.pid,
+                    spec["attempt"],
+                    state["heartbeat_sequence"],
+                    spec["stdout_path"],
+                    spec["stderr_path"],
+                    state["last_sizes"],
+                )
+                state["last_heartbeat_at"] = now
+            else:
+                state["last_sizes"] = {"stdout": stdout_size, "stderr": stderr_size}
+
+        if active:
+            time.sleep(0.1)
+    return outcomes
 
 
 def run_watch(args, task_ids, timeout):
@@ -843,6 +1265,10 @@ def main(argv=None):
     parser.add_argument("--stale-threshold", type=int)
     parser.add_argument("--max-attempts", type=int, default=2)
     parser.add_argument("--log-tail-lines", type=int, default=20)
+    parser.add_argument("--heartbeat-interval-seconds", type=float, default=60)
+    parser.add_argument("--abort-on-no-progress-seconds", type=float, default=0)
+    parser.add_argument("--abort-on-repeated-failures", type=int, default=0)
+    parser.add_argument("--abort-failure-pattern", default=DEFAULT_ABORT_FAILURE_PATTERN)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
@@ -850,18 +1276,6 @@ def main(argv=None):
     args.inbox = os.path.abspath(args.inbox)
     if not os.path.isdir(args.inbox):
         print("error: inbox directory not found: {}".format(args.inbox), file=sys.stderr)
-        return 1
-
-    recipe_file = args.recipe_file or os.path.join(args.inbox, "invoke-recipes.json")
-    recipes_data, err = read_recipes(recipe_file)
-    if err:
-        print("error: {}".format(err), file=sys.stderr)
-        return 1
-    profile_name = args.permission_profile or recipes_data.get(
-        "default_permission_profile", "cal3-bounded-edit"
-    )
-    if profile_name not in PROFILES:
-        print("error: unknown permission profile: {}".format(profile_name), file=sys.stderr)
         return 1
 
     task_ids = []
@@ -875,17 +1289,63 @@ def main(argv=None):
     if args.max_workers < 1:
         print("error: --max-workers must be >= 1", file=sys.stderr)
         return 1
+    if args.heartbeat_interval_seconds < 0:
+        print("error: --heartbeat-interval-seconds must be >= 0", file=sys.stderr)
+        return 1
+    if args.abort_on_no_progress_seconds < 0:
+        print("error: --abort-on-no-progress-seconds must be >= 0", file=sys.stderr)
+        return 1
+    if args.abort_on_repeated_failures < 0:
+        print("error: --abort-on-repeated-failures must be >= 0", file=sys.stderr)
+        return 1
+    if args.abort_on_repeated_failures > 0:
+        try:
+            re.compile(args.abort_failure_pattern)
+        except re.error as exc:
+            print("error: invalid --abort-failure-pattern: {}".format(exc), file=sys.stderr)
+            return 1
     if len(task_ids) > args.max_workers:
         print("error: task count exceeds --max-workers", file=sys.stderr)
         return 1
 
     tasks = []
-    launch_specs = []
+    # Recipe resolution follows the roster source so a marked project override
+    # keeps using its own .agent-inbox/invoke-recipes.json even when
+    # LOCAL_INVOKE_RECIPES.json also exists in the Skill root. Same path feeds
+    # both the gate and the worker launch below.
+    _, _roster_source = resolve_roster(args.inbox)
+    recipe_file = args.recipe_file or resolve_recipes(args.inbox, roster_source=_roster_source)[0]
     for task_id in task_ids:
         task, err = find_task(args.inbox, task_id)
         if err:
             print("error: {}".format(err), file=sys.stderr)
             return 1
+        ok, status = require_usable_roster(
+            args.inbox,
+            agent_name=task.get("agent_name", ""),
+            require_cal3=True,
+            recipe_file=recipe_file,
+        )
+        maybe_warn_roster(status)
+        if not ok:
+            print(format_roster_block(status), file=sys.stderr)
+            return 2
+        tasks.append(task)
+
+    recipes_data, err = read_recipes(recipe_file)
+    if err:
+        print("error: {}".format(err), file=sys.stderr)
+        return 1
+    profile_name = args.permission_profile or recipes_data.get(
+        "default_permission_profile", "cal3-bounded-edit"
+    )
+    if profile_name not in PROFILES:
+        print("error: unknown permission profile: {}".format(profile_name), file=sys.stderr)
+        return 1
+
+    launch_specs = []
+    for task in tasks:
+        task_id = task.get("task_id", "")
         err = check_permission(task, profile_name)
         if err:
             print("error: task {} refused: {}".format(task_id, err), file=sys.stderr)
@@ -934,7 +1394,6 @@ def main(argv=None):
             "cwd": cwd,
             "env_overrides": env_overrides,
         })
-        tasks.append(task)
 
     overlap = scopes_overlap(tasks)
     if len(tasks) > 1 and overlap:
@@ -963,6 +1422,7 @@ def main(argv=None):
                 max_attempts=args.max_attempts,
             )
             return 2
+        spec["attempt"] = attempts + 1
 
     processes = {}
     for spec in launch_specs:
@@ -977,6 +1437,7 @@ def main(argv=None):
         spec["stdout_path"] = stdout_path
         spec["stderr_path"] = stderr_path
         spec["status_path"] = status_path
+        write_log_readme(log_dir)
 
         emit(
             args,
@@ -1015,7 +1476,7 @@ def main(argv=None):
             )
         else:
             spec["source_snapshot_before"] = None
-        if profile_name != "cal3-release-gated":
+        if not profile_allows_commit(profile_name):
             spec["git_history_before"] = git_history_snapshot(spec["workspace"])
         else:
             spec["git_history_before"] = None
@@ -1032,6 +1493,7 @@ def main(argv=None):
                 stderr=stderr_handle,
                 shell=False,
                 text=True,
+                **subprocess_startup_kwargs(),
             )
         except OSError as exc:
             stdout_handle.close()
@@ -1049,6 +1511,7 @@ def main(argv=None):
             spec["recipe_id"],
             log_dir,
             process.pid,
+            spec["attempt"],
         )
         emit(args, "started", task_id, session_id="pid:{}".format(process.pid))
         processes[task_id] = (process, stdout_handle, stderr_handle, spec)
@@ -1056,25 +1519,28 @@ def main(argv=None):
     if args.dry_run:
         return 0
 
+    monitor_outcomes = monitor_processes(processes, args, events_path)
+
     overall_exit = 0
     results = {}
-    for task_id, (process, stdout_handle, stderr_handle, spec) in processes.items():
+    for task_id, (_process, _stdout_handle, _stderr_handle, spec) in processes.items():
+        outcome = monitor_outcomes[task_id]
         report_valid = None
         report_reason = None
         source_violations = []
         commit_violations = []
-        timeout = args.timeout_seconds or int(spec["recipe"].get("timeout_seconds", 1800))
-        try:
-            return_code = process.wait(timeout=max(1, timeout))
-        except subprocess.TimeoutExpired:
-            process.terminate()
-            return_code = None
-            state = "TIMEOUT"
-        finally:
-            stdout_handle.close()
-            stderr_handle.close()
+        timeout_termination = outcome.get("timeout_termination")
+        abort_reason = outcome.get("abort_reason")
+        abort_evidence_tail = outcome.get("abort_evidence_tail")
+        abort_termination = outcome.get("abort_termination")
+        return_code = outcome.get("return_code")
+        state = outcome.get("state")
 
-        if return_code is None:
+        if state == "ABORTED":
+            overall_exit = 1
+        elif state == "TIMEOUT":
+            overall_exit = 1
+        elif return_code is None:
             state = "TIMEOUT"
             overall_exit = 1
         elif return_code != 0:
@@ -1083,7 +1549,7 @@ def main(argv=None):
         else:
             if os.path.isfile(spec["report_path"]):
                 report_valid, report_reason = validate_expected_report(
-                    spec["report_path"], task_id
+                    spec["report_path"], task_id, task=spec["task"]
                 )
                 if report_valid:
                     state = "FINISHED"
@@ -1118,7 +1584,7 @@ def main(argv=None):
         # commit, which leaves no local trace; that residual egress is bounded
         # by the recipe network capability + sandbox, not by this guard.
         # Recorded on any real exit; only a clean exit becomes a violation.
-        if return_code is not None and profile_name != "cal3-release-gated":
+        if return_code is not None and not profile_allows_commit(profile_name):
             after_history = git_history_snapshot(spec["workspace"])
             commit_violations = git_history_changes(
                 spec.get("git_history_before"), after_history
@@ -1127,7 +1593,7 @@ def main(argv=None):
                 state = "COMMIT_VIOLATION"
                 overall_exit = 1
 
-        if state in {"FAILED", "NO_REPORT"}:
+        if state in {"FAILED", "NO_REPORT", "ABORTED", "TIMEOUT"}:
             patterns = spec["recipe"].get("approval_patterns", [])
             if contains_approval([spec["stdout_path"], spec["stderr_path"]], patterns):
                 state = "APPROVAL_REQUIRED"
@@ -1137,7 +1603,7 @@ def main(argv=None):
         if os.path.isfile(spec["report_path"]):
             if report_valid is None:
                 report_valid, report_reason = validate_expected_report(
-                    spec["report_path"], task_id
+                    spec["report_path"], task_id, task=spec["task"]
                 )
             report_validation = {
                 "result": "pass" if report_valid else "fail",
@@ -1152,6 +1618,10 @@ def main(argv=None):
             "report_validation": report_validation,
             "source_violations": source_violations,
             "commit_violations": commit_violations,
+            "timeout_termination": timeout_termination,
+            "abort_reason": abort_reason,
+            "abort_evidence_tail": abort_evidence_tail,
+            "abort_termination": abort_termination,
         }
 
     if should_run_compat_watch(results):
@@ -1193,6 +1663,11 @@ def main(argv=None):
         source_violations = result["source_violations"]
         commit_violations = result["commit_violations"]
         report_validation = result["report_validation"]
+        timeout_termination = result.get("timeout_termination")
+        abort_reason = result.get("abort_reason")
+        abort_evidence_tail = result.get("abort_evidence_tail")
+        abort_termination = result.get("abort_termination")
+        primary_path = primary_log_path(spec["stdout_path"], spec["stderr_path"])
 
         # Re-validate after the compat watch so late_report_validation reflects
         # a report that only landed (or changed) during the watcher pass,
@@ -1200,7 +1675,7 @@ def main(argv=None):
         late_report_validation = report_validation
         if os.path.isfile(spec["report_path"]):
             late_valid, late_reason = validate_expected_report(
-                spec["report_path"], task_id
+                spec["report_path"], task_id, task=spec["task"]
             )
             late_report_validation = {
                 "result": "pass" if late_valid else "fail",
@@ -1214,6 +1689,7 @@ def main(argv=None):
             "report_path": spec["report_path"].replace("\\", "/"),
             "stdout_log": spec["stdout_path"].replace("\\", "/"),
             "stderr_log": spec["stderr_path"].replace("\\", "/"),
+            "primary_log_path": primary_path.replace("\\", "/"),
             "watch_event": watch_event,
             "watch_log": watch_log.replace("\\", "/") if watch_log else None,
             "report_validation": report_validation,
@@ -1223,12 +1699,23 @@ def main(argv=None):
             status["source_violations"] = source_violations
         if commit_violations:
             status["commit_violations"] = commit_violations
+        if timeout_termination:
+            status["timeout_termination"] = timeout_termination
+        if abort_reason:
+            status["abort_reason"] = abort_reason
+        if abort_evidence_tail is not None:
+            status["abort_evidence_tail"] = abort_evidence_tail
+        if abort_termination:
+            status["abort_termination"] = abort_termination
         if state != "FINISHED":
             status["redacted_stdout_tail"] = tail_redacted(
                 spec["stdout_path"], args.log_tail_lines
             )
             status["redacted_stderr_tail"] = tail_redacted(
                 spec["stderr_path"], args.log_tail_lines
+            )
+            status["redacted_primary_log_tail"] = tail_redacted(
+                primary_path, args.log_tail_lines
             )
         with open(spec["status_path"], "w", encoding="utf-8", newline="\n") as handle:
             json.dump(status, handle, ensure_ascii=False, indent=2)

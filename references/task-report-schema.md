@@ -52,7 +52,7 @@ For ordinary workers, use `protocol_mode: task-only` or `protocol_mode: worker-b
 
 `write_reports` authorizes writing only the specified `report_path`. `write_task_files` authorizes creating or modifying task files and should normally be `no` for workers.
 
-`completion_marker` is optional user-visible coordination metadata. It records the exact expected final chat line when a handoff sequence is used; it never replaces the schema-valid report artifact. When the coordinator does not supply `handoff.sequence`, `afc-assign.py` auto-allocates the next number from the inbox counter file `.agent-inbox/.seq` (an O(1) read, never archived), so every dispatched task carries a marker. A dry-run or a failed dispatch never consumes a number.
+`completion_marker` is optional user-visible coordination metadata. It records the exact expected final chat line when a handoff sequence is used; it never replaces the schema-valid report artifact. When the coordinator does not supply `handoff.sequence`, `afc-assign.py` reserves the next unique number from the inbox counter file `.agent-inbox/.seq` under an exclusive lock (an O(1) operation, never archived), so concurrent assignments cannot receive the same marker. Dry-runs do not consume a number. A real assignment that fails after reservation may leave a harmless gap; uniqueness and fail-closed counter persistence take precedence over gap-free numbering.
 
 `validation_command` is an optional single-line code-quality gate authored by the coordinator (workers cannot write task files, so it stays trusted). When present, the handoff instructs the worker to run it as a gate before reporting — it must exit 0, and the worker records the command, exit code, and a short output tail in evidence. The worker self-run keeps cost proportionate; the command's scope is sized to `validation_tier` (run the targeted tests, not the whole suite). For genuinely high-risk tasks only — `permission_scope.commit_push: approved`, or `validation_tier` of `full-suite` / `production-replay` — `afc-intake.py` re-runs the command first-hand against the worker's diff and raises `VALIDATION_COMMAND_FAILED` on a non-zero exit, so code quality does not depend on the worker's honesty. This graded re-run is a deterministic function of existing task fields (never an LLM risk score); all other tasks trust the worker's evidence. Pass `--skip-validation-command` to disable the re-run.
 
@@ -223,8 +223,12 @@ Allowed `event_type` values:
 ROSTER_UPDATED
 TASK_CREATED
 TASK_ASSIGNED
+TASK_DISPATCHED
 TASK_STARTED
+WORKER_HEARTBEAT
+TASK_ABORTED
 REPORT_RECEIVED
+REPORT_REJECTED
 STATUS_UPDATED
 WORKTREE_LOCKED
 WORKTREE_RELEASED
@@ -232,9 +236,16 @@ COORDINATOR_VERDICT
 TASK_CLOSED
 TASK_BLOCKED
 TASK_SUPERSEDED
+REPAIR_ROUND
 ```
 
 Task-related events should include `task_id`. If `status` is present, it must use the task lifecycle status values. If `lock_status` is present, it must use worktree lock status values.
+
+CAL-3 `TASK_STARTED`, `WORKER_HEARTBEAT`, and `TASK_ABORTED` events include a
+positive `attempt` number and `worker_session_id`. A timeout is recorded as
+`TASK_ABORTED` with `abort_reason: timeout`; retrying never removes the earlier
+attempt from append-only history. Heartbeats are liveness evidence only and do
+not prove completion.
 
 ## Report Metadata Schema
 

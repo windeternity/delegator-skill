@@ -16,10 +16,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: "3.x"
 
@@ -43,7 +43,15 @@ jobs:
           fi
 
       - name: Run public safety scan
-        run: python -B scripts/check-public-safety.py .
+        run: |
+          if [ -f scripts/sync-public-repo.ps1 ]; then
+            pwsh -NoProfile -File scripts/sync-public-repo.ps1 \
+              -DestinationPath "$RUNNER_TEMP/delegator-public-export" \
+              -CleanDirectories \
+              -RunChecks
+          else
+            python -B scripts/check-public-safety.py .
+          fi
 
       - name: Check release evidence gates
         run: |
@@ -89,6 +97,9 @@ jobs:
 
       - name: Run audit-docs surface-growth gate fixture tests
         run: python -B examples/fixtures/audit-docs-growth/run-tests.py
+
+      - name: Run Delegator contract fixture tests
+        run: python -B examples/fixtures/audit-docs-delegator-contract/run-tests.py
 
       - name: Run afc-init fixture tests
         run: python -B examples/fixtures/afc-init/run-tests.py
@@ -146,6 +157,17 @@ jobs:
 
       - name: Run afc-validation-command fixture tests
         run: python -B examples/fixtures/afc-validation-command/run-tests.py
+
+      - name: Run afc-roster-resolver fixture tests
+        run: python -B examples/fixtures/afc-roster-resolver/run-tests.py
+
+      - name: Run sync-skill preservation fixture tests
+        run: |
+          if [ -f scripts/sync-skill.ps1 ]; then
+            python -B examples/fixtures/sync-skill/run-tests.py
+          else
+            echo "SKIP: sync-skill.ps1 is private-upstream-only"
+          fi
 
       - name: Check public-facing Delegator naming
         run: python -B scripts/check-public-naming.py

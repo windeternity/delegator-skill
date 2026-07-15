@@ -13,6 +13,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -170,6 +171,13 @@ def path_is_within(path, parent):
         return False
 
 
+def codex_network_access():
+    raw = os.environ.get("AFC_CAL3_CODEX_NETWORK_ACCESS", "").strip().lower()
+    if raw in {"1", "true", "yes", "allowed"}:
+        return "allowed"
+    return "none"
+
+
 def codex_recipe(path):
     return {
         "tool": "codex",
@@ -191,7 +199,7 @@ def codex_recipe(path):
         "capability": {
             "modify_source": True,
             "run_commands": "bounded",
-            "network_access": "none",
+            "network_access": codex_network_access(),
             "commit_push": "no",
         },
         "approval_patterns": [
@@ -207,6 +215,9 @@ def codex_recipe(path):
             "cal3-bounded-edit": {"codex_sandbox": "workspace-write"},
             "cal3-local-autonomous": {"codex_sandbox": "workspace-write"},
             "cal3-local-autonomous-high": {"codex_sandbox": "workspace-write"},
+            "cal3-network-readonly": {"codex_sandbox": "workspace-write"},
+            "cal3-network-work": {"codex_sandbox": "workspace-write"},
+            "cal3-approved-commit": {"codex_sandbox": "workspace-write"},
             "cal3-release-gated": {"codex_sandbox": "workspace-write"},
         },
     }
@@ -241,6 +252,23 @@ def codex_launcher_recipe(launcher):
         "{prompt}",
     ]
     return recipe
+
+
+def parse_aliases(raw):
+    aliases = []
+    for part in re.split(r"[;,]", raw or ""):
+        alias = part.strip()
+        if alias and alias not in aliases:
+            aliases.append(alias)
+    return aliases
+
+
+def codex_agent_aliases(launcher=""):
+    aliases = parse_aliases(os.environ.get("AFC_CAL3_CODEX_ALIASES", ""))
+    base = os.path.basename(launcher or "").lower()
+    if launcher and ("codex3p" in base or "3p" in base) and "codex3p" not in aliases:
+        aliases.append("codex3p")
+    return aliases
 
 
 def mimo_recipe(path):
@@ -286,6 +314,9 @@ def mimo_recipe(path):
             "cal3-bounded-edit": {},
             "cal3-local-autonomous": {},
             "cal3-local-autonomous-high": {},
+            "cal3-network-readonly": {},
+            "cal3-network-work": {},
+            "cal3-approved-commit": {},
             "cal3-release-gated": {},
         },
     }
@@ -325,6 +356,9 @@ def claude_recipe(path):
             "cal3-bounded-edit": {},
             "cal3-local-autonomous": {},
             "cal3-local-autonomous-high": {},
+            "cal3-network-readonly": {},
+            "cal3-network-work": {},
+            "cal3-approved-commit": {},
             "cal3-release-gated": {},
         },
     }
@@ -364,6 +398,9 @@ def opencode_recipe(path):
             "cal3-bounded-edit": {},
             "cal3-local-autonomous": {},
             "cal3-local-autonomous-high": {},
+            "cal3-network-readonly": {},
+            "cal3-network-work": {},
+            "cal3-approved-commit": {},
             "cal3-release-gated": {},
         },
     }
@@ -394,6 +431,7 @@ def probe_tool(name, path, help_args, recipe_builder):
 def build_recipes():
     probes = []
     recipes = {}
+    agent_recipes = {}
 
     codex_launcher = os.environ.get("AFC_CAL3_CODEX_LAUNCHER", "").strip()
     if codex_launcher:
@@ -408,6 +446,8 @@ def build_recipes():
                 "launcher": codex_launcher,
                 "path": codex_launcher,
             })
+            for alias in codex_agent_aliases(codex_launcher):
+                agent_recipes[alias] = "codex"
         else:
             # A configured launcher is an explicit backend choice. Fail closed
             # instead of silently falling back to native codex.
@@ -424,6 +464,8 @@ def build_recipes():
         probes.append(probe)
         if recipe:
             recipes["codex"] = recipe
+            for alias in codex_agent_aliases():
+                agent_recipes[alias] = "codex"
 
     probe, recipe = probe_tool("mimo", shutil.which("mimo"), ["run", "--help"], mimo_recipe)
     probes.append(probe)
@@ -449,11 +491,21 @@ def build_recipes():
         "schema_version": "0.1.0",
         "generated_at": utc_now_iso(),
         "default_permission_profile": "cal3-bounded-edit",
-        "agent_recipes": {},
+        "agent_recipes": agent_recipes,
         "recipes": recipes,
         "probes": probes,
         "notes": [
             "Map project-local agent names to recipe ids in agent_recipes.",
+            "Bind personal aliases such as codex3p through agent_recipes or "
+            "AFC_CAL3_CODEX_LAUNCHER; do not hardcode them in the dispatcher.",
+            "Set AFC_CAL3_CODEX_ALIASES=alias1,alias2 before probing to bind "
+            "project-local codex aliases to the codex recipe.",
+            "Codex recipes default network_access to none; set "
+            "AFC_CAL3_CODEX_NETWORK_ACCESS=allowed only after local Codex "
+            "workspace-write network access is explicitly configured.",
+            "External SQLite/Chroma/vector-store data dirs outside workspace "
+            "must be authorized in local Codex writable_roots; recipes do not "
+            "auto-expand filesystem write boundaries.",
             "Keep this file in .agent-inbox; do not copy it into a skill package.",
             "codex backend: set AFC_CAL3_CODEX_LAUNCHER to a launcher script "
             "(e.g. a third-party-model wrapper) to route codex through it; "

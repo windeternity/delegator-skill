@@ -8,11 +8,18 @@ and routing policy.
 
 CAL is a session setting, not a schema version. It can be recorded in local notes, `STATUS.md` prose, or `events.jsonl` summaries, but it does not change the `agent-file-coordination/*` schemas.
 
-CAL workers must be external to the current coordinator session. A built-in
-subagent, `multi_agent.spawn_agent`, or chat-only worker call is not a CAL-1,
-CAL-2, or CAL-3 worker route. Model or CLI aliases must resolve to an AFC
-roster entry, a user-relayed external worker, or a CAL-3 CLI recipe.
-If no such route exists, stop and report that the worker route is unavailable.
+While Delegator is active, never use a built-in subagent, internal helper,
+`multi_agent.spawn_agent`, or chat-only worker call for exploration, review,
+implementation, or fallback. `DIRECT` means the coordinator itself executes;
+CAL-1, CAL-2, and CAL-3 use external worker routes.
+Model or CLI aliases must resolve to a usable AFC roster entry. CAL-1/CAL-2
+entries may be user-relayed external chats/tools/sessions; CAL-3 entries also
+need callable CLI recipes and probe evidence. If no usable route exists, stop
+and ask for the missing resource configuration.
+
+The full roster gate runs only after routing selects external dispatch. It must
+not weaken route-first behavior: `DIRECT` tasks do not read or hydrate the full
+roster.
 
 ## Level Summary
 
@@ -21,6 +28,17 @@ If no such route exists, stop and report that the worker route is unavailable.
 | CAL-1 | Manual Relay | yes | yes | no | no | Supported and actively optimized |
 | CAL-2 | Auto Intake | yes | no | yes | no | Supported and actively optimized |
 | CAL-3 | Full Auto Coordination | no | no | yes | yes | Selectable default; CLI-verification-gated at dispatch |
+
+## Quick Comparison: trade-offs at first contact
+
+The orientation block shown the first time a user picks a default. Per-mode
+detail lives in the sections below; this is the condensed decision view.
+
+| Mode | Who launches | Pros | Cons | CLI probe |
+|---|---|---|---|---|
+| CAL-1 Manual Relay | You paste the handoff and report done | Works anywhere; lowest risk; no watcher or CLI | You are the transport; slowest loop | Not required |
+| CAL-2 Auto Intake | You paste the handoff; coordinator auto-detects the report | Removes your "done" message; zero-token wait | Needs a foreground watcher; one inbox consumer | Not required |
+| CAL-3 Full Auto | Coordinator launches a local CLI worker | Hands-off batch dispatch; lowest user effort | Highest risk; requires a verified callable CLI per worker | Required at first use and when stale |
 
 ## CAL-1: Manual Relay
 
@@ -36,6 +54,8 @@ The user acts as the relay:
 
 - Lowest operational risk.
 - Works with any worker that can read a task file and write or return a report.
+- The worker must be a rostered external route; current-session helpers are not
+  valid worker substitutes.
 - No long-running coordinator watcher is required.
 - Still removes most copy-paste load: the worker reads a task file instead of a long chat prompt, and report evidence lands in a structured file.
 
@@ -44,6 +64,8 @@ The user acts as the relay:
 - The user remains a relay and can forget to notify the coordinator.
 - Coordination is slower.
 - The coordinator must still reject chat-only completion claims when the report file or expected worktree artifacts are missing.
+- Placeholder-only or incomplete rosters stop dispatch before handoff
+  generation.
 
 ## CAL-2: Auto Intake
 
@@ -126,6 +148,16 @@ CAL-3 must launch real worker processes through `afc-cal3-probe.py` /
 `afc-cal3-dispatch.py` or an equivalent documented CLI dispatcher. It must not
 launch current-session subagents.
 
+Before automatic dispatch, the selected worker must have both a usable roster
+row and a callable, probe-verified invoke recipe. The roster and recipes are
+read from the install-local `LOCAL_ROSTER.md` / `LOCAL_INVOKE_RECIPES.json` by
+default (shared across projects); project files are explicit override / legacy.
+Missing binding or missing probe evidence blocks automatic dispatch rather than
+falling back to a default profile or internal subagent. This verification runs
+at first use and whenever the binding or probe is missing, stale, changed, or
+previously failed — not as a full probe on every task when a recorded probe is
+still valid.
+
 ### Benefits
 
 - Lowest user effort for large queues of low-risk, repeatable tasks.
@@ -170,7 +202,10 @@ The opt-in implementation shape is:
    evidence. `afc-cal2-arm.py` / `afc-watch.py` are then used only as a
    best-effort dashboard/intake compatibility path for reports that already
    exist. It refuses to auto-spawn after the configured rework fuse is reached
-   (`--max-attempts`, default 2).
+   (`--max-attempts`, default 2). During long runs it may emit
+   `WORKER_HEARTBEAT` liveness events and can fail fast on configured
+   no-progress or repeated-failure thresholds; those signals are never
+   completion evidence.
 3. `afc-release-executor.py` handles deterministic post-GO commit/push chores
    behind the J6 Release-Operator hard gates when explicitly authorized.
 
@@ -184,6 +219,24 @@ invokes it via `powershell -File` / `cmd /c`, keeping machine-specific paths and
 credentials out of the recipe and the repo. After install/update, run
 `afc-cal3-probe.py` once and check each codex probe's `backend` field
 (`native` | `launcher`) to confirm which codex it will drive.
+
+By default Codex aliases belong in the install-local `LOCAL_INVOKE_RECIPES.json`
+`agent_recipes`; project `.agent-inbox/invoke-recipes.json` is legacy/override.
+`afc-cal3-probe.py` can populate common Codex aliases from
+`AFC_CAL3_CODEX_ALIASES=alias1,alias2`; launcher filenames containing `3p`
+also map `codex3p` to the `codex` recipe. The dispatcher still fails closed
+when a task agent has no recipe binding.
+
+Codex recipes do not advertise network capability by default. Set
+`AFC_CAL3_CODEX_NETWORK_ACCESS=allowed` before probing only when the local Codex
+`workspace-write` sandbox is explicitly configured to allow network access.
+
+Codex `workspace-write` sandboxes do not automatically permit writes to local
+data stores outside the task workspace. Tools backed by SQLite, Chroma, vector
+stores, or similar data dirs may need filesystem writes even for read/search
+operations. Add those paths to the local Codex `writable_roots` config only
+when the user deliberately authorizes them; Delegator does not infer or grant
+that access from the task file.
 
 Default worker routing for CAL-3 dogfood is recorded in
 `references/cal3-default-routing-policy.md`. It is evidence-based routing
@@ -228,35 +281,28 @@ across several projects before changing the recommendation posture.
 
 ## Choosing And Remembering A Level
 
-The CAL level is chosen once, at the **first skill trigger** for a project,
-before any routing or delegation. This is a lightweight step: the coordinator
-presents a compact CAL-1/CAL-2/CAL-3 distinction and asks the user to pick a
-default. The fuller resource/model/roster interview stays at the first external
-dispatch (see `references/session-bootstrap-gate.md`), where it is actually
-needed.
+The CAL level is chosen once per install-local user profile. At the first skill
+trigger in each coordinator session, before routing, the coordinator runs a
+cheap presence check; only an unconfigured profile receives the compact
+CAL-1/CAL-2/CAL-3 orientation. The fuller roster interview stays at the first
+external dispatch where the resolved roster is unusable.
 
 ```text
-Pick a default coordination level for this project:
+Pick a default coordination level for this user profile:
 - CAL-1 (manual relay): you forward handoffs and report done. Safe default, works everywhere.
 - CAL-2 (auto intake): you forward handoffs; the coordinator auto-detects reports. Recommended when a foreground watcher is available.
 - CAL-3 (full auto): the coordinator launches workers via a local CLI. Highest automation, highest risk; first dispatch still requires CLI verification.
 I will record this as the default until you ask to change it.
 ```
 
-After the user chooses, record the level in project-local coordination state:
-
-- `.agent-inbox/AGENT_ROSTER.md`: add a short preference note near the top or
-  in coordinator `Notes`.
-- `.agent-inbox/events.jsonl`: append a `ROSTER_UPDATED` summary such as
-  `Confirmed default CAL-2 auto intake` (or CAL-1 / CAL-3).
-
-The recorded level becomes the default for future coordination on that project.
-Do not ask again unless the user requests a change, the watcher or worker route
-is unavailable, or the current task needs a capability outside the recorded
-preference.
+After the user chooses, record the level in install-local `LOCAL_ROSTER.md`.
+It becomes the default across projects. An explicitly marked project roster may
+override it for that project; only that override writes a project-local
+`ROSTER_UPDATED` event. Do not ask again unless the user requests a change or
+the selected route becomes unavailable.
 
 If the user does not choose and work must proceed, default to CAL-1 for that
-invocation only and leave the project default unset.
+invocation only and leave the user-profile default unset.
 
 CAL-3 may be recorded as a default. Recording it does not skip its dispatch
 gate: the first automatic dispatch under CAL-3 still requires the CLI
